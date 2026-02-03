@@ -120,11 +120,20 @@ const scBridgeToken =
   (flags['sc-bridge-token'] && String(flags['sc-bridge-token'])) ||
   env.SC_BRIDGE_TOKEN ||
   '';
+const scBridgeCliRaw =
+  (flags['sc-bridge-cli'] && String(flags['sc-bridge-cli'])) ||
+  env.SC_BRIDGE_CLI ||
+  '';
+const scBridgeCliEnabled = parseBool(scBridgeCliRaw, false);
 const scBridgeDebugRaw =
   (flags['sc-bridge-debug'] && String(flags['sc-bridge-debug'])) ||
   env.SC_BRIDGE_DEBUG ||
   '';
 const scBridgeDebug = parseBool(scBridgeDebugRaw, false);
+
+if (scBridgeEnabled && !scBridgeToken) {
+  throw new Error('SC-Bridge requires --sc-bridge-token (auth is mandatory).');
+}
 
 const readHexFile = (filePath, byteLength) => {
   try {
@@ -251,6 +260,8 @@ if (scBridgeEnabled) {
     filterChannels: scBridgeFilterChannels || undefined,
     token: scBridgeToken,
     debug: scBridgeDebug,
+    cliEnabled: scBridgeCliEnabled,
+    requireAuth: true,
   });
 }
 

@@ -1,4 +1,5 @@
 import Feature from 'trac-peer/src/artifacts/feature.js';
+import { TerminalHandlers } from 'trac-peer/src/terminal/handlers.js';
 import b4a from 'b4a';
 import ws from 'bare-ws';
 
@@ -41,10 +42,14 @@ class ScBridge extends Feature {
     this.server = null;
     this.started = false;
     this.clients = new Set();
+    this.cliHandlers = new TerminalHandlers(peer);
+    this.cliQueue = Promise.resolve();
 
     this.host = typeof config.host === 'string' ? config.host : '127.0.0.1';
     this.port = Number.isSafeInteger(config.port) ? config.port : 49222;
     this.token = typeof config.token === 'string' && config.token.length > 0 ? config.token : null;
+    this.requireAuth = config.requireAuth !== false;
+    this.cliEnabled = config.cliEnabled === true;
     this.debug = config.debug === true;
 
     this.defaultFilterRaw = typeof config.filter === 'string' ? config.filter : '';
@@ -113,9 +118,14 @@ class ScBridge extends Feature {
       this._sendError(client, 'Invalid message.');
       return;
     }
-    if (this.token && !client.authed) {
-      if (message.type === 'auth' && message.token === this.token) {
+    if (message.type === 'auth') {
+      if (!this.token) {
+        this._sendError(client, 'Auth not enabled.');
+        return;
+      }
+      if (message.token === this.token) {
         client.authed = true;
+        client.ready = true;
         this._broadcastToClient(client, { type: 'auth_ok' });
         return;
       }
@@ -123,7 +133,45 @@ class ScBridge extends Feature {
       return;
     }
 
+    if (this.requireAuth && !client.authed) {
+      this._sendError(client, 'Unauthorized.');
+      return;
+    }
+
     switch (message.type) {
+      case 'cli': {
+        if (!this.cliEnabled) {
+          this._sendError(client, 'CLI over WS is disabled.');
+          return;
+        }
+        const command = typeof message.command === 'string' ? message.command.trim() : '';
+        if (!command) {
+          this._sendError(client, 'Missing command.');
+          return;
+        }
+        this._enqueueCli(command)
+          .then((result) => {
+            this._broadcastToClient(client, {
+              type: 'cli_result',
+              command,
+              ok: result.ok,
+              output: result.output,
+              error: result.error,
+              result: result.result,
+            });
+          })
+          .catch((err) => {
+            this._broadcastToClient(client, {
+              type: 'cli_result',
+              command,
+              ok: false,
+              output: [],
+              error: err?.message ?? String(err),
+              result: null,
+            });
+          });
+        return;
+      }
       case 'ping':
         this._broadcastToClient(client, { type: 'pong', ts: Date.now() });
         return;
@@ -234,14 +282,141 @@ class ScBridge extends Feature {
     this._handleClientMessage(client, msg);
   }
 
+  _formatLogArgs(args) {
+    return args
+      .map((value) => {
+        if (typeof value === 'string') return value;
+        try {
+          return JSON.stringify(value);
+        } catch (_e) {
+          return String(value);
+        }
+      })
+      .join(' ');
+  }
+
+  async _withConsoleCapture(fn) {
+    const output = [];
+    const original = {
+      log: console.log,
+      error: console.error,
+      warn: console.warn,
+    };
+    console.log = (...args) => {
+      output.push(this._formatLogArgs(args));
+      original.log(...args);
+    };
+    console.error = (...args) => {
+      output.push(this._formatLogArgs(args));
+      original.error(...args);
+    };
+    console.warn = (...args) => {
+      output.push(this._formatLogArgs(args));
+      original.warn(...args);
+    };
+    try {
+      const result = await fn();
+      return { ok: true, output, result, error: null };
+    } catch (err) {
+      return { ok: false, output, result: null, error: err?.message ?? String(err) };
+    } finally {
+      console.log = original.log;
+      console.error = original.error;
+      console.warn = original.warn;
+    }
+  }
+
+  _enqueueCli(command) {
+    const run = async () => this._withConsoleCapture(() => this._dispatchCli(command));
+    this.cliQueue = this.cliQueue.then(run, run);
+    return this.cliQueue;
+  }
+
+  async _dispatchCli(input) {
+    const handlers = [
+      { rule: (line) => line === '/stats', handler: (line) => this.cliHandlers.verifyDag(line) },
+      { rule: (line) => line === '/help', handler: () => this._printHelpToConsole() },
+      { rule: (line) => line === '/exit', handler: () => this.cliHandlers.exit({}) },
+      { rule: (line) => line === '/get_keys', handler: () => this.cliHandlers.getKeys() },
+      { rule: (line) => line.startsWith('/tx'), handler: (line) => this.cliHandlers.tx(line) },
+      { rule: (line) => line.startsWith('/add_indexer'), handler: (line) => this.cliHandlers.addIndexer(line) },
+      { rule: (line) => line.startsWith('/add_writer'), handler: (line) => this.cliHandlers.addWriter(line) },
+      { rule: (line) => line.startsWith('/remove_writer'), handler: (line) => this.cliHandlers.removeWriter(line) },
+      { rule: (line) => line.startsWith('/remove_indexer'), handler: (line) => this.cliHandlers.removeIndexer(line) },
+      { rule: (line) => line.startsWith('/add_admin'), handler: (line) => this.cliHandlers.addAdmin(line) },
+      { rule: (line) => line.startsWith('/update_admin'), handler: (line) => this.cliHandlers.updateAdmin(line) },
+      { rule: (line) => line.startsWith('/enable_transactions'), handler: (line) => this.cliHandlers.enableTransactions(line) },
+      { rule: (line) => line.startsWith('/set_auto_add_writers'), handler: (line) => this.cliHandlers.setAutoAddWriters(line) },
+      { rule: (line) => line.startsWith('/set_chat_status'), handler: (line) => this.cliHandlers.setChatStatus(line) },
+      { rule: (line) => line.startsWith('/post'), handler: (line) => this.cliHandlers.postMessage(line) },
+      { rule: (line) => line.startsWith('/set_nick'), handler: (line) => this.cliHandlers.setNick(line) },
+      { rule: (line) => line.startsWith('/mute_status'), handler: (line) => this.cliHandlers.muteStatus(line) },
+      { rule: (line) => line.startsWith('/pin_message'), handler: (line) => this.cliHandlers.pinMessage(line) },
+      { rule: (line) => line.startsWith('/unpin_message'), handler: (line) => this.cliHandlers.unpinMessage(line) },
+      { rule: (line) => line.startsWith('/set_mod'), handler: (line) => this.cliHandlers.setMod(line) },
+      { rule: (line) => line.startsWith('/delete_message'), handler: (line) => this.cliHandlers.deleteMessage(line) },
+      { rule: (line) => line.startsWith('/enable_whitelist'), handler: (line) => this.cliHandlers.enableWhitelist(line) },
+      { rule: (line) => line.startsWith('/set_whitelist_status'), handler: (line) => this.cliHandlers.setWhitelistStatus(line) },
+      { rule: (line) => line.startsWith('/deploy_subnet'), handler: (line) => this.cliHandlers.deploySubnet(line) },
+      { rule: () => true, handler: (line) => this.peer?.protocol?.instance?.customCommand(line) },
+    ];
+
+    for (const { rule, handler } of handlers) {
+      if (!rule(input)) continue;
+      return handler(input);
+    }
+    return null;
+  }
+
+  _printHelpToConsole() {
+    // Mirror Terminal.printHelp content without needing readline.
+    console.log('Node started. Available commands:');
+    console.log(' ');
+    console.log('- Setup Commands:');
+    console.log('- /add_admin | Works only once and only on the bootstrap node. Enter a peer public key (hex) to assign admin rights: \'/add_admin --address "<hex>"\'.');
+    console.log('- /update_admin | Existing admins may transfer admin ownership. Enter "null" as address to waive admin rights for this peer entirely: \'/update_admin --address "<address>"\'.');
+    console.log('- /add_indexer | Only admin. Enter a peer writer key to get included as indexer for this network: \'/add_indexer --key "<key>"\'.');
+    console.log('- /add_writer | Only admin. Enter a peer writer key to get included as writer for this network: \'/add_writer --key "<key>"\'.');
+    console.log('- /remove_writer | Only admin. Enter a peer writer key to get removed as writer or indexer for this network: \'/remove_writer --key "<key>"\'.');
+    console.log('- /remove_indexer | Only admin. Alias of /remove_writer (removes indexer as well): \'/remove_indexer --key "<key>"\'.');
+    console.log('- /set_auto_add_writers | Only admin. Allow any peer to join as writer automatically: \'/set_auto_add_writers --enabled 1\'');
+    console.log('- /enable_transactions | Enable transactions.');
+    console.log(' ');
+    console.log('- Chat Commands:');
+    console.log('- /set_chat_status | Only admin. Enable/disable the built-in chat system: \'/set_chat_status --enabled 1\'. The chat system is disabled by default.');
+    console.log('- /post | Post a message: \'/post --message "Hello"\'. Chat must be enabled. Optionally use \'--reply_to <message id>\' to respond to a desired message.');
+    console.log('- /set_nick | Change your nickname like this \'/set_nick --nick "Peter"\'. Chat must be enabled. Can be edited by admin and mods using the optional --user <address> flag.');
+    console.log('- /mute_status | Only admin and mods. Mute or unmute a user by their address: \'/mute_status --user "<address>" --muted 1\'.');
+    console.log('- /set_mod | Only admin. Set a user as mod: \'/set_mod --user "<address>" --mod 1\'.');
+    console.log('- /delete_message | Delete a message: \'/delete_message --id 1\'. Chat must be enabled.');
+    console.log('- /pin_message | Set the pin status of a message: \'/pin_message --id 1 --pin 1\'. Chat must be enabled.');
+    console.log('- /unpin_message | Unpin a message by its pin id: \'/unpin_message --pin_id 1\'. Chat must be enabled.');
+    console.log('- /enable_whitelist | Only admin. Enable/disable chat whitelists: \'/enable_whitelist --enabled 1\'.');
+    console.log('- /set_whitelist_status | Only admin. Add/remove users to/from the chat whitelist: \'/set_whitelist_status --user "<address>" --status 1\'.');
+    console.log(' ');
+    console.log('- System Commands:');
+    console.log('- /tx | Perform a contract transaction. The command flag contains contract commands (format is protocol dependent): \'/tx --command "<string>"\'. To simulate a tx, additionally use \'--sim 1\'.');
+    console.log('- /deploy_subnet | Register this subnet in the MSB (required before TX settlement): \'/deploy_subnet\'.');
+    console.log('- /stats | check system properties such as writer key, DAG, etc.');
+    console.log('- /get_keys | prints your public and private keys. Be careful and never share your private key!');
+    console.log('- /exit | Exit the program');
+    console.log('- /help | This help text');
+    if (this.peer?.protocol?.instance?.printOptions) {
+      this.peer.protocol.instance.printOptions();
+    }
+  }
+
   start() {
     if (this.started) return;
+    if (this.requireAuth && !this.token) {
+      throw new Error('SC-Bridge requires --sc-bridge-token when auth is required.');
+    }
     this.started = true;
     this.server = new ws.Server({ host: this.host, port: this.port }, (socket) => {
       const client = {
         socket,
-        ready: !this.token,
-        authed: !this.token,
+        ready: !this.requireAuth,
+        authed: !this.requireAuth,
         filter: this.defaultFilter,
         channels: null,
       };
@@ -253,7 +428,7 @@ class ScBridge extends Feature {
         address: this.peer?.wallet?.address ?? null,
         entryChannel: this.sidechannel?.entryChannel ?? null,
         filter: this.defaultFilterRaw || '',
-        requiresAuth: Boolean(this.token),
+        requiresAuth: this.requireAuth,
       };
       this._broadcastToClient(client, hello);
 

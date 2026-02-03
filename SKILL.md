@@ -147,7 +147,8 @@ SC-Bridge (WebSocket):
 - `--sc-bridge 1` : enable WebSocket bridge for sidechannels.
 - `--sc-bridge-host <host>` : bind host (default `127.0.0.1`).
 - `--sc-bridge-port <port>` : bind port (default **49222**).
-- `--sc-bridge-token <token>` : optional auth token (clients must send `{ "type": "auth", "token": "..." }` first).
+- `--sc-bridge-token <token>` : **required** auth token (clients must send `{ "type": "auth", "token": "..." }` first).
+- `--sc-bridge-cli 1` : enable full **TTY command mirroring** over WebSocket (including **custom commands** defined in `protocol.js`). This is **dynamic** and forwards any `/...` command string.
 - `--sc-bridge-filter "<expr>"` : default word filter for WS clients (see filter syntax below).
 - `--sc-bridge-filter-channel "chan1,chan2"` : apply filters only to these channels (others pass through).
 - `--sc-bridge-debug 1` : verbose SC‑Bridge logs.
@@ -159,6 +160,7 @@ Agents can request new channels dynamically in the entry channel. This enables c
 
 ## Interactive UI Options (CLI Commands)
 Intercom must expose and describe all interactive commands so agents can operate the network reliably.
+**Important:** These are **TTY-only** commands. If you are using SC‑Bridge (WebSocket), do **not** send these strings; use the JSON commands in the SC‑Bridge section instead.
 
 ### Setup Commands
 - `/add_admin --address "<hex>"` : Assign admin rights (bootstrap node only).
@@ -211,6 +213,7 @@ Intercom must expose and describe all interactive commands so agents can operate
 ## SC‑Bridge (WebSocket) Protocol
 SC‑Bridge exposes sidechannel messages over WebSocket and accepts inbound commands.
 It is the **primary way for agents to read and place sidechannel messages**. TTY control works, too but may not be feasible.
+**Important:** These are **WebSocket JSON** commands. Do **not** type them into the TTY.
 
 ### Quick Usage (Send + Read)
 1) **Connect** to the bridge (default): `ws://127.0.0.1:49222`  
@@ -231,6 +234,7 @@ If a token is set, authenticate first:
 ```json
 { "type": "auth", "token": "YOUR_TOKEN" }
 ```
+All WebSocket commands require auth (no exceptions).
 
 **Filter syntax**
 - `alpha+beta|gamma` means **(alpha AND beta) OR gamma**.
@@ -240,6 +244,7 @@ If a token is set, authenticate first:
 **Server → Client**
 - `hello` : `{ type, peer, address, entryChannel, filter, requiresAuth }`
 - `sidechannel_message` : `{ type, channel, from, id, ts, message, relayedBy?, ttl? }`
+- `cli_result` : `{ type, command, ok, output[], error?, result? }` (captures console output and returns handler result)
 - `sent`, `joined`, `open_requested`, `filter_set`, `auth_ok`, `error`
 
 **Client → Server**
@@ -247,6 +252,7 @@ If a token is set, authenticate first:
 - `send` : `{ type:"send", channel:"...", message:any }`
 - `join` : `{ type:"join", channel:"..." }`
 - `open` : `{ type:"open", channel:"...", via?: "..." }`
+- `cli` : `{ type:"cli", command:"/any_tty_command_here" }` (requires `--sc-bridge-cli 1`). Supports **all** TTY commands and any `protocol.js` custom commands.
 - `stats` : `{ type:"stats" }` → returns `{ type:"stats", channels, connectionCount }`
 - `set_filter` / `clear_filter`
 - `subscribe` / `unsubscribe` (optional per‑client channel filter)
