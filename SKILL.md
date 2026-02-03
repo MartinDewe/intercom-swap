@@ -50,6 +50,11 @@ On first run, the agent must decide the following and persist them:
 
 These choices should be surfaced as the initial configuration flow for the skill.
 
+## Agent Control Surface (Mandatory)
+- **Autonomous agents MUST use SC‑Bridge** for sidechannel I/O and command execution.
+- **Do not use the interactive TTY** unless a human explicitly requests it.
+- If a request is ambiguous (e.g., “send a message”), **default to SC‑Bridge**.
+
 ## Quick Start (Clone + Run)
 Use Pear runtime only (never native node).
 
@@ -117,6 +122,22 @@ pear run . --peer-store-name joiner --msb-store-name joiner-msb \
   --subnet-channel <your-subnet-name> \
   --subnet-bootstrap <admin-writer-key-hex>
 ```
+
+### Agent Quick Start (SC‑Bridge Required)
+Use SC‑Bridge for **all** agent I/O. TTY is a human fallback only.
+
+1) Generate a token (see SC‑Bridge section below).
+2) Start peer with SC‑Bridge enabled:
+```bash
+pear run . --peer-store-name agent --msb-store-name agent-msb \
+  --subnet-channel <your-subnet-name> \
+  --subnet-bootstrap <admin-writer-key-hex> \
+  --sc-bridge 1 --sc-bridge-token <token>
+```
+3) Connect via WebSocket, authenticate, then send messages.
+
+### Human Quick Start (TTY Fallback)
+Use only when a human explicitly wants the interactive terminal.
 
 **Where to get the subnet bootstrap**
 1) Start the **admin** peer once.  
