@@ -149,10 +149,10 @@ pear -v
 ```bash
 git clone https://github.com/Trac-Systems/intercom ./intercom
 cd intercom
-cd trac/contract-test-latest
 npm install
 ```
-All commands below assume you are working from the **`contract-test-latest` app folder** inside the repo.
+Then change into the **app folder that contains this SKILL.md** and its `package.json` (the `contract-test-latest` app).  
+All commands below assume you are working from that app folder.
 
 ### Core Updates (npm + Pear)
 Use this for dependency refreshes and runtime updates only. **Do not change repo pins** unless explicitly instructed.
