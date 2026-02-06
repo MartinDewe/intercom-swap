@@ -80,9 +80,7 @@ export function validateSwapBody(kind, body) {
     }
 
     case KIND.QUOTE: {
-      if (typeof body.rfq_id !== 'string' || body.rfq_id.trim().length === 0) {
-        return { ok: false, error: 'quote.rfq_id is required' };
-      }
+      if (!isHex(body.rfq_id, 32)) return { ok: false, error: 'quote.rfq_id must be 32-byte hex' };
       if (body.pair !== PAIR.BTC_LN__USDT_SOL) return { ok: false, error: 'quote.pair unsupported' };
       if (body.direction !== `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`) {
         return { ok: false, error: 'quote.direction unsupported' };
@@ -91,6 +89,50 @@ export function validateSwapBody(kind, body) {
       if (!isPosInt(body.btc_sats)) return { ok: false, error: 'quote.btc_sats must be a positive integer' };
       if (!isPosInt(body.valid_until_unix)) {
         return { ok: false, error: 'quote.valid_until_unix must be a unix seconds integer' };
+      }
+      return { ok: true, error: null };
+    }
+
+    case KIND.QUOTE_ACCEPT: {
+      if (!isHex(body.rfq_id, 32)) return { ok: false, error: 'quote_accept.rfq_id must be 32-byte hex' };
+      if (!isHex(body.quote_id, 32)) return { ok: false, error: 'quote_accept.quote_id must be 32-byte hex' };
+      if (body.note !== undefined && typeof body.note !== 'string') {
+        return { ok: false, error: 'quote_accept.note must be a string' };
+      }
+      return { ok: true, error: null };
+    }
+
+    case KIND.SWAP_INVITE: {
+      if (!isHex(body.rfq_id, 32)) return { ok: false, error: 'swap_invite.rfq_id must be 32-byte hex' };
+      if (!isHex(body.quote_id, 32)) return { ok: false, error: 'swap_invite.quote_id must be 32-byte hex' };
+      if (typeof body.swap_channel !== 'string' || body.swap_channel.trim().length === 0) {
+        return { ok: false, error: 'swap_invite.swap_channel is required' };
+      }
+      if (body.owner_pubkey !== undefined && body.owner_pubkey !== null) {
+        if (!isHex(body.owner_pubkey, 32)) return { ok: false, error: 'swap_invite.owner_pubkey must be 32-byte hex' };
+      }
+
+      // Sidechannel invite payload can be included inline (preferred) or as base64 JSON.
+      const hasInviteObject = isObject(body.invite);
+      const hasInviteB64 = typeof body.invite_b64 === 'string' && body.invite_b64.trim().length > 0;
+      if (!hasInviteObject && !hasInviteB64) {
+        return { ok: false, error: 'swap_invite.invite (object) or invite_b64 (string) is required' };
+      }
+      if (hasInviteObject) {
+        if (!isObject(body.invite.payload) || typeof body.invite.sig !== 'string' || body.invite.sig.trim().length === 0) {
+          return { ok: false, error: 'swap_invite.invite must include { payload, sig }' };
+        }
+        if (String(body.invite.payload.channel || '') !== String(body.swap_channel)) {
+          return { ok: false, error: 'swap_invite.invite.payload.channel must match swap_channel' };
+        }
+      }
+      if (body.welcome !== undefined && body.welcome !== null) {
+        if (!isObject(body.welcome)) return { ok: false, error: 'swap_invite.welcome must be an object' };
+      }
+      if (body.welcome_b64 !== undefined && body.welcome_b64 !== null) {
+        if (typeof body.welcome_b64 !== 'string' || body.welcome_b64.trim().length === 0) {
+          return { ok: false, error: 'swap_invite.welcome_b64 must be a string' };
+        }
       }
       return { ok: true, error: null };
     }

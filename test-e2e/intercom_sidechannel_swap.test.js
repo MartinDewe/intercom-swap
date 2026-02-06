@@ -567,28 +567,88 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
     if (evt.channel === swapChannel) seen.eve.swap.push(evt.message);
   });
 
-  // Ensure we have a working connection (OTC channel is non-invite-protected, but welcome-protected).
-  const ping = { ping: runId, ts: Date.now() };
+  const tradeId = `swap_e2e_${runId}`;
+  let aliceTrade = createInitialTrade(tradeId);
+  let bobTrade = createInitialTrade(tradeId);
+
+  // OTC handshake: RFQ -> QUOTE -> QUOTE_ACCEPT -> SWAP_INVITE (delivers sidechannel invite).
+  const nowSec = Math.floor(Date.now() / 1000);
+  const usdtAmount = 100_000_000n;
+  const sats = 50_000;
+
+  const rfqUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.RFQ,
+    tradeId,
+    body: {
+      pair: PAIR.BTC_LN__USDT_SOL,
+      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      btc_sats: sats,
+      usdt_amount: usdtAmount.toString(),
+      valid_until_unix: nowSec + 60,
+    },
+  });
+  const rfqSigned = await signEnvelopeViaBridge(bobSc, rfqUnsigned);
+  assert.equal(validateSwapEnvelope(rfqSigned).ok, true);
   await sendUntilReceived({
     sender: bobSc,
     receiverSeen: seen.alice.otc,
     channel: otcChannel,
-    message: ping,
+    message: rfqSigned,
     sendOptions: {},
-    match: (m) => m?.ping === runId,
-    label: 'otc ping bob->alice',
+    match: (m) => m?.kind === KIND.RFQ && m?.trade_id === tradeId,
+    label: 'alice got rfq',
   });
+  const rfqId = hashUnsignedEnvelope(rfqUnsigned);
+
+  const quoteUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.QUOTE,
+    tradeId,
+    body: {
+      rfq_id: rfqId,
+      pair: PAIR.BTC_LN__USDT_SOL,
+      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      btc_sats: sats,
+      usdt_amount: usdtAmount.toString(),
+      valid_until_unix: nowSec + 30,
+    },
+  });
+  const quoteSigned = await signEnvelopeViaBridge(aliceSc, quoteUnsigned);
+  assert.equal(validateSwapEnvelope(quoteSigned).ok, true);
   await sendUntilReceived({
     sender: aliceSc,
     receiverSeen: seen.bob.otc,
     channel: otcChannel,
-    message: { pong: runId, ts: Date.now() },
+    message: quoteSigned,
     sendOptions: {},
-    match: (m) => m?.pong === runId,
-    label: 'otc pong alice->bob',
+    match: (m) => m?.kind === KIND.QUOTE && m?.trade_id === tradeId,
+    label: 'bob got quote',
+  });
+  const quoteId = hashUnsignedEnvelope(quoteUnsigned);
+
+  const quoteAcceptUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.QUOTE_ACCEPT,
+    tradeId,
+    body: {
+      rfq_id: rfqId,
+      quote_id: quoteId,
+    },
+  });
+  const quoteAcceptSigned = await signEnvelopeViaBridge(bobSc, quoteAcceptUnsigned);
+  assert.equal(validateSwapEnvelope(quoteAcceptSigned).ok, true);
+  await sendUntilReceived({
+    sender: bobSc,
+    receiverSeen: seen.alice.otc,
+    channel: otcChannel,
+    message: quoteAcceptSigned,
+    sendOptions: {},
+    match: (m) => m?.kind === KIND.QUOTE_ACCEPT && m?.trade_id === tradeId,
+    label: 'alice got quote_accept',
   });
 
-  // Prepare swap-channel welcome + invite (owned by the service peer Alice).
+  // Prepare swap-channel welcome + invite (owned by the service peer Alice) and deliver it over OTC.
   const swapWelcome = createSignedWelcome(
     { channel: swapChannel, ownerPubKey: aliceKeys.pubHex, text: `swap ${runId}` },
     signAliceHex
@@ -605,19 +665,43 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
     { welcome: swapWelcome }
   );
 
-  // Join swap channel (service joins first).
+  const swapInviteUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.SWAP_INVITE,
+    tradeId,
+    body: {
+      rfq_id: rfqId,
+      quote_id: quoteId,
+      swap_channel: swapChannel,
+      owner_pubkey: aliceKeys.pubHex,
+      invite: inviteForBob,
+      welcome: swapWelcome,
+    },
+  });
+  const swapInviteSigned = await signEnvelopeViaBridge(aliceSc, swapInviteUnsigned);
+  assert.equal(validateSwapEnvelope(swapInviteSigned).ok, true);
+  await sendUntilReceived({
+    sender: aliceSc,
+    receiverSeen: seen.bob.otc,
+    channel: otcChannel,
+    message: swapInviteSigned,
+    sendOptions: {},
+    match: (m) => m?.kind === KIND.SWAP_INVITE && m?.trade_id === tradeId,
+    label: 'bob got swap_invite',
+  });
+
+  // Join swap channel (service joins first; client uses invite).
   const joinA = await aliceSc.join(swapChannel, { welcome: swapWelcome });
   assert.equal(joinA.type, 'joined');
 
-  const joinB = await bobSc.join(swapChannel, { invite: inviteForBob, welcome: swapWelcome });
+  const joinB = await bobSc.join(swapChannel, {
+    invite: swapInviteSigned.body.invite,
+    welcome: swapInviteSigned.body.welcome,
+  });
   assert.equal(joinB.type, 'joined');
 
   const joinE = await eveSc.join(swapChannel);
   assert.equal(joinE.type, 'joined');
-
-  const tradeId = `swap_e2e_${runId}`;
-  let aliceTrade = createInitialTrade(tradeId);
-  let bobTrade = createInitialTrade(tradeId);
 
   // Bob sends a signed "ready" status with invite attached (ensures Alice authorizes Bob quickly).
   const readyUnsigned = createUnsignedEnvelope({
@@ -633,7 +717,7 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
     receiverSeen: seen.alice.swap,
     channel: swapChannel,
     message: readySigned,
-    sendOptions: { invite: inviteForBob },
+    sendOptions: { invite: swapInviteSigned.body.invite },
     match: (m) => m?.kind === KIND.STATUS,
     label: 'alice got ready',
     tries: 60,
@@ -642,9 +726,6 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   });
 
   // Terms (service is LN receiver + Solana depositor).
-  const nowSec = Math.floor(Date.now() / 1000);
-  const usdtAmount = 100_000_000n;
-  const sats = 50_000;
 
   const termsUnsigned = createUnsignedEnvelope({
     v: 1,

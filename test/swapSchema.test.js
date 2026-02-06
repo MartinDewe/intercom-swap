@@ -85,13 +85,14 @@ test('swap schema: rfq + quote validate', async () => {
     nonce: 'r1',
   });
   assert.equal(validateSwapEnvelope(rfq).ok, true);
+  const rfqId = hashUnsignedEnvelope(rfq);
 
   const quote = createUnsignedEnvelope({
     v: 1,
     kind: KIND.QUOTE,
     tradeId: 'quote_1',
     body: {
-      rfq_id: 'rfq_1',
+      rfq_id: rfqId,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
       btc_sats: 1000,
@@ -108,7 +109,7 @@ test('swap schema: rfq + quote validate', async () => {
     kind: KIND.QUOTE,
     tradeId: 'quote_2',
     body: {
-      rfq_id: 'rfq_1',
+      rfq_id: rfqId,
       pair: PAIR.BTC_LN__USDT_SOL,
       direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
       btc_sats: 1000,
@@ -118,4 +119,78 @@ test('swap schema: rfq + quote validate', async () => {
     nonce: 'q2',
   });
   assert.equal(validateSwapEnvelope(quoteMissingExpiry).ok, false);
+});
+
+test('swap schema: quote_accept + swap_invite validate', async () => {
+  const maker = await newWallet();
+  const taker = await newWallet();
+
+  const tradeId = 'swap_test_otc_1';
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  const rfq = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.RFQ,
+    tradeId,
+    body: {
+      pair: PAIR.BTC_LN__USDT_SOL,
+      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      btc_sats: 1000,
+      usdt_amount: '1000000',
+      valid_until_unix: nowSec + 60,
+    },
+    ts: Date.now(),
+    nonce: 'r1',
+  });
+  const rfqId = hashUnsignedEnvelope(rfq);
+
+  const quoteUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.QUOTE,
+    tradeId,
+    body: {
+      rfq_id: rfqId,
+      pair: PAIR.BTC_LN__USDT_SOL,
+      direction: `${ASSET.BTC_LN}->${ASSET.USDT_SOL}`,
+      btc_sats: 1000,
+      usdt_amount: '1000000',
+      valid_until_unix: nowSec + 30,
+    },
+    ts: Date.now(),
+    nonce: 'q1',
+  });
+  const quote = signEnvelope(maker, quoteUnsigned);
+  assert.equal(validateSwapEnvelope(quote).ok, true);
+
+  const quoteId = hashUnsignedEnvelope(quoteUnsigned);
+  const quoteAcceptUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.QUOTE_ACCEPT,
+    tradeId,
+    body: {
+      rfq_id: rfqId,
+      quote_id: quoteId,
+    },
+    ts: Date.now(),
+    nonce: 'qa1',
+  });
+  const quoteAccept = signEnvelope(taker, quoteAcceptUnsigned);
+  assert.equal(validateSwapEnvelope(quoteAccept).ok, true);
+
+  const swapInviteUnsigned = createUnsignedEnvelope({
+    v: 1,
+    kind: KIND.SWAP_INVITE,
+    tradeId,
+    body: {
+      rfq_id: rfqId,
+      quote_id: quoteId,
+      swap_channel: 'swap:abc123',
+      owner_pubkey: b4a.toString(maker.publicKey, 'hex'),
+      invite_b64: 'dGVzdA==',
+    },
+    ts: Date.now(),
+    nonce: 'si1',
+  });
+  const swapInvite = signEnvelope(maker, swapInviteUnsigned);
+  assert.equal(validateSwapEnvelope(swapInvite).ok, true);
 });

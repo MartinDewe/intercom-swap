@@ -46,6 +46,9 @@ Swap message helpers (signed swap envelopes, sent over sidechannels):
   rfq --channel <otcChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> [--valid-until-unix <sec>]
   quote --channel <otcChannel> --trade-id <id> --rfq-id <id> --btc-sats <n> --usdt-amount <atomicStr> --valid-until-unix <sec>
   quote-from-rfq --channel <otcChannel> --rfq-json <envelope|@file> [--btc-sats <n>] [--usdt-amount <atomicStr>] [--valid-until-unix <sec>]
+  quote-accept --channel <otcChannel> --quote-json <envelope|@file>
+  swap-invite-from-accept --channel <otcChannel> --accept-json <envelope|@file> [--swap-channel <name>] [--welcome-text <text>] [--ttl-sec <sec>]
+  join-from-swap-invite --swap-invite-json <envelope|@file>
   terms --channel <swapChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> --sol-mint <base58> --sol-recipient <base58> --sol-refund <base58> --sol-refund-after-unix <sec> --ln-receiver-peer <hex32> --ln-payer-peer <hex32> [--terms-valid-until-unix <sec>]
   accept --channel <swapChannel> --trade-id <id> (--terms-hash <hex> | --terms-json <envelope|@file>)
 
@@ -171,6 +174,12 @@ async function signSwapEnvelope(sc, unsignedEnvelope) {
   const v = validateSwapEnvelope(signed);
   if (!v.ok) throw new Error(`Internal error: signed envelope invalid: ${v.error}`);
   return signed;
+}
+
+function stripSignature(envelope) {
+  if (!envelope || typeof envelope !== 'object') return envelope;
+  const { sig: _sig, signer: _signer, ...unsigned } = envelope;
+  return unsigned;
 }
 
 async function main() {
@@ -452,6 +461,130 @@ async function main() {
     await sendSigned(channel, signed);
     process.stdout.write(`${JSON.stringify(signed, null, 2)}\n`);
     process.stdout.write(`rfq_id=${rfqId}\n`);
+    return;
+  }
+
+  if (cmd === 'quote-accept') {
+    const channel = requireFlag(flags, 'channel');
+    const quoteRaw = parseJsonOrBase64(requireFlag(flags, 'quote-json'));
+    if (!quoteRaw) die('Invalid --quote-json (expected JSON/base64/@file)');
+
+    const v = validateSwapEnvelope(quoteRaw);
+    if (!v.ok) die(`Invalid quote envelope: ${v.error}`);
+    if (quoteRaw.kind !== KIND.QUOTE) die(`Invalid quote envelope kind=${quoteRaw.kind}`);
+
+    const quoteId = hashUnsignedEnvelope(stripSignature(quoteRaw));
+    const rfqId = String(quoteRaw.body.rfq_id);
+    const tradeId = String(quoteRaw.trade_id);
+
+    const unsigned = createUnsignedEnvelope({
+      v: 1,
+      kind: KIND.QUOTE_ACCEPT,
+      tradeId,
+      body: { rfq_id: rfqId, quote_id: quoteId },
+    });
+    const signed = await withScBridge({ url, token }, (sc) => signSwapEnvelope(sc, unsigned));
+    await sendSigned(channel, signed);
+    process.stdout.write(`${JSON.stringify(signed, null, 2)}\n`);
+    process.stdout.write(`quote_id=${quoteId}\n`);
+    return;
+  }
+
+  if (cmd === 'swap-invite-from-accept') {
+    const channel = requireFlag(flags, 'channel');
+    const acceptRaw = parseJsonOrBase64(requireFlag(flags, 'accept-json'));
+    if (!acceptRaw) die('Invalid --accept-json (expected JSON/base64/@file)');
+
+    const v = validateSwapEnvelope(acceptRaw);
+    if (!v.ok) die(`Invalid quote_accept envelope: ${v.error}`);
+    if (acceptRaw.kind !== KIND.QUOTE_ACCEPT) die(`Invalid accept envelope kind=${acceptRaw.kind}`);
+
+    const tradeId = String(acceptRaw.trade_id);
+    const swapChannel =
+      (flags.get('swap-channel') && String(flags.get('swap-channel')).trim()) || `swap:${tradeId}`;
+    const welcomeText =
+      (flags.get('welcome-text') && String(flags.get('welcome-text'))) || `swap ${tradeId}`;
+    const ttlSec = maybeInt(flags.get('ttl-sec'), 'ttl-sec');
+
+    const inviteePubKey = String(acceptRaw.signer || '').trim().toLowerCase();
+    if (!inviteePubKey) die('accept envelope missing signer pubkey');
+
+    const rfqId = String(acceptRaw.body.rfq_id);
+    const quoteId = String(acceptRaw.body.quote_id);
+
+    const res = await withScBridge({ url, token }, async (sc) => {
+      const { signerHex: ownerPubKey } = await signViaBridge(sc, { _probe: 'swap_invite_owner' });
+      const welcomePayload = normalizeWelcomePayload({
+        channel: swapChannel,
+        ownerPubKey,
+        text: welcomeText,
+        issuedAt: Date.now(),
+        version: 1,
+      });
+      const { sigHex: welcomeSig } = await signViaBridge(sc, welcomePayload);
+      const welcome = { payload: welcomePayload, sig: welcomeSig };
+
+      const issuedAt = Date.now();
+      const ttlMs = ttlSec !== null ? ttlSec * 1000 : 7 * 24 * 3600 * 1000;
+      const invitePayload = normalizeInvitePayload({
+        channel: swapChannel,
+        inviteePubKey,
+        inviterPubKey: ownerPubKey,
+        inviterAddress: null,
+        issuedAt,
+        expiresAt: issuedAt + ttlMs,
+        nonce: Math.random().toString(36).slice(2, 10),
+        version: 1,
+      });
+      const { sigHex: inviteSig } = await signViaBridge(sc, invitePayload);
+      const invite = createSignedInvite(invitePayload, () => inviteSig, { welcome });
+
+      const unsigned = createUnsignedEnvelope({
+        v: 1,
+        kind: KIND.SWAP_INVITE,
+        tradeId,
+        body: {
+          rfq_id: rfqId,
+          quote_id: quoteId,
+          swap_channel: swapChannel,
+          owner_pubkey: ownerPubKey,
+          invite,
+          welcome,
+        },
+      });
+      const signed = await signSwapEnvelope(sc, unsigned);
+      return { signed, swapChannel, ownerPubKey, welcome, invite };
+    });
+
+    await sendSigned(channel, res.signed);
+    process.stdout.write(`${JSON.stringify(res.signed, null, 2)}\n`);
+    process.stdout.write(`swap_channel=${res.swapChannel}\n`);
+    process.stdout.write(`owner_pubkey=${res.ownerPubKey}\n`);
+    process.stdout.write(`welcome_b64=${toB64Json(res.welcome)}\n`);
+    process.stdout.write(`invite_b64=${toB64Json(res.invite)}\n`);
+    return;
+  }
+
+  if (cmd === 'join-from-swap-invite') {
+    const swapInviteRaw = parseJsonOrBase64(requireFlag(flags, 'swap-invite-json'));
+    if (!swapInviteRaw) die('Invalid --swap-invite-json (expected JSON/base64/@file)');
+
+    const v = validateSwapEnvelope(swapInviteRaw);
+    if (!v.ok) die(`Invalid swap_invite envelope: ${v.error}`);
+    if (swapInviteRaw.kind !== KIND.SWAP_INVITE) die(`Invalid envelope kind=${swapInviteRaw.kind}`);
+
+    const swapChannel = String(swapInviteRaw.body.swap_channel || '').trim();
+    if (!swapChannel) die('swap_invite missing swap_channel');
+
+    const invite =
+      swapInviteRaw.body.invite ||
+      (swapInviteRaw.body.invite_b64 ? parseJsonOrBase64(swapInviteRaw.body.invite_b64) : null);
+    const welcome =
+      swapInviteRaw.body.welcome ||
+      (swapInviteRaw.body.welcome_b64 ? parseJsonOrBase64(swapInviteRaw.body.welcome_b64) : null);
+
+    const res = await withScBridge({ url, token }, (sc) => sc.join(swapChannel, { invite, welcome }));
+    process.stdout.write(`${JSON.stringify(res, null, 2)}\n`);
     return;
   }
 

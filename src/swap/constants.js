@@ -13,6 +13,8 @@ export const KIND = Object.freeze({
   SVC_ANNOUNCE: 'swap.svc_announce',
   RFQ: 'swap.rfq',
   QUOTE: 'swap.quote',
+  QUOTE_ACCEPT: 'swap.quote_accept',
+  SWAP_INVITE: 'swap.swap_invite',
 
   TERMS: 'swap.terms',
   ACCEPT: 'swap.accept',
@@ -37,4 +39,3 @@ export const STATE = Object.freeze({
   REFUNDED: 'refunded',
   CANCELED: 'canceled',
 });
-
