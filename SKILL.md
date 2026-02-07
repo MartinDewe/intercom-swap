@@ -1008,6 +1008,29 @@ Lightning (local node only; no wallet-service APIs):
 # Example: query a running CLN node (CLI backend).
 scripts/lnctl.sh info --impl cln --backend cli --network bitcoin
 
+# Lightning liquidity prerequisites (important for swaps):
+# - The payer (taker) needs outbound liquidity to pay invoices.
+# - The receiver (maker) needs inbound liquidity to receive invoices.
+# For deterministic bring-up between 2 nodes, open a direct channel (taker -> maker) once and reuse it for many swaps.
+#
+# Example (LND, docker backend): open a private channel from taker to maker.
+# 1) Read node ids (identity_pubkey).
+scripts/lnctl.sh info --impl lnd --backend docker --network mainnet \
+  --compose-file dev/lnd-mainnet/docker-compose.yml --service lnd-maker
+scripts/lnctl.sh info --impl lnd --backend docker --network mainnet \
+  --compose-file dev/lnd-mainnet/docker-compose.yml --service lnd-taker
+# 2) Connect taker -> maker (replace <makerNodeId>).
+scripts/lnctl.sh connect --impl lnd --backend docker --network mainnet \
+  --compose-file dev/lnd-mainnet/docker-compose.yml --service lnd-taker \
+  --peer "<makerNodeId>@lnd-maker:9735"
+# 3) Fund channel (on-chain tx; takes confirmations to become active).
+scripts/lnctl.sh fundchannel --impl lnd --backend docker --network mainnet \
+  --compose-file dev/lnd-mainnet/docker-compose.yml --service lnd-taker \
+  --node-id "<makerNodeId>" --amount-sats 200000
+# 4) Confirm the channel is active (look for it in result.channels.channels).
+scripts/lnctl.sh listfunds --impl lnd --backend docker --network mainnet \
+  --compose-file dev/lnd-mainnet/docker-compose.yml --service lnd-taker
+
 # Example: setup LND Neutrino nodes (recommended for mainnet; no full node required).
 # Start on signet first, then switch --network mainnet once everything is proven.
 #
