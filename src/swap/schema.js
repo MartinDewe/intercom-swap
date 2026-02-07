@@ -200,6 +200,32 @@ export function validateSwapBody(kind, body) {
       if (!isHex(body.ln_payer_peer, 32)) {
         return { ok: false, error: 'terms.ln_payer_peer must be 32-byte hex' };
       }
+
+      // Fee policy is part of the binding terms. Values are bps integers.
+      if (!isUint(body.platform_fee_bps)) {
+        return { ok: false, error: 'terms.platform_fee_bps must be an integer >= 0' };
+      }
+      if (!isUint(body.trade_fee_bps)) {
+        return { ok: false, error: 'terms.trade_fee_bps must be an integer >= 0' };
+      }
+      if (Number(body.platform_fee_bps) > 2500) {
+        return { ok: false, error: 'terms.platform_fee_bps exceeds 2500 bps cap' };
+      }
+      if (Number(body.trade_fee_bps) > 2500) {
+        return { ok: false, error: 'terms.trade_fee_bps exceeds 2500 bps cap' };
+      }
+      if (Number(body.platform_fee_bps) + Number(body.trade_fee_bps) > 2500) {
+        return { ok: false, error: 'terms total fee bps exceeds 2500 bps cap' };
+      }
+      if (body.platform_fee_collector !== undefined && body.platform_fee_collector !== null) {
+        if (!isBase58(body.platform_fee_collector)) {
+          return { ok: false, error: 'terms.platform_fee_collector must be base58' };
+        }
+      }
+      if (!isBase58(body.trade_fee_collector)) {
+        return { ok: false, error: 'terms.trade_fee_collector must be base58' };
+      }
+
       if (body.terms_valid_until_unix !== undefined && !isPosInt(body.terms_valid_until_unix)) {
         return { ok: false, error: 'terms.terms_valid_until_unix must be unix seconds integer' };
       }

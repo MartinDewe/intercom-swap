@@ -26,7 +26,7 @@ test('swap verify: payer pre-pay checks (invoice + escrow + terms)', () => {
 
   const escrowBody = {
     payment_hash_hex: paymentHashHex,
-    program_id: 'evYHPt33hCYHNm7iFHAHXmSkYrEoDnBSv69MHwLfYyK',
+    program_id: '4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF',
     escrow_pda: '11111111111111111111111111111111',
     vault_ata: '11111111111111111111111111111111',
     mint: terms.sol_mint,
@@ -63,4 +63,3 @@ test('swap verify: payer pre-pay checks (invoice + escrow + terms)', () => {
   assert.equal(badInvoice.ok, false);
   assert.match(badInvoice.error, /invoice invalid/i);
 });
-

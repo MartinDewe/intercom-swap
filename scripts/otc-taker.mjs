@@ -648,6 +648,8 @@ async function main() {
       { label: 'taker:ensure-ata' }
     );
     const programId = swapCtx.trade.escrow?.program_id ? new PublicKey(swapCtx.trade.escrow.program_id) : undefined;
+    const tradeFeeCollectorStr = swapCtx.trade.terms?.trade_fee_collector;
+    if (!tradeFeeCollectorStr) throw new Error('Missing terms.trade_fee_collector');
     const { tx: claimTx } = await sol.pool.call(
       (connection) =>
         claimEscrowTx({
@@ -657,6 +659,7 @@ async function main() {
           mint,
           paymentHashHex,
           preimageHex,
+          tradeFeeCollector: new PublicKey(String(tradeFeeCollectorStr)),
           ...(programId ? { programId } : {}),
         }),
       { label: 'taker:build-claim-tx' }

@@ -55,7 +55,7 @@ Swap message helpers (signed swap envelopes, sent over sidechannels):
   quote-accept --channel <otcChannel> --quote-json <envelope|@file>
   swap-invite-from-accept --channel <otcChannel> --accept-json <envelope|@file> [--swap-channel <name>] [--welcome-text <text>] [--ttl-sec <sec>]
   join-from-swap-invite --swap-invite-json <envelope|@file>
-  terms --channel <swapChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> --sol-mint <base58> --sol-recipient <base58> --sol-refund <base58> --sol-refund-after-unix <sec> --ln-receiver-peer <hex32> --ln-payer-peer <hex32> [--terms-valid-until-unix <sec>]
+  terms --channel <swapChannel> --trade-id <id> --btc-sats <n> --usdt-amount <atomicStr> --sol-mint <base58> --sol-recipient <base58> --sol-refund <base58> --sol-refund-after-unix <sec> --ln-receiver-peer <hex32> --ln-payer-peer <hex32> --platform-fee-bps <n> --trade-fee-bps <n> --trade-fee-collector <base58> [--platform-fee-collector <base58>] [--terms-valid-until-unix <sec>]
   accept --channel <swapChannel> --trade-id <id> (--terms-hash <hex> | --terms-json <envelope|@file>)
 
 Verification helpers:
@@ -831,6 +831,12 @@ async function main() {
     const solRefundAfter = maybeInt(requireFlag(flags, 'sol-refund-after-unix'), 'sol-refund-after-unix');
     const lnReceiverPeer = requireFlag(flags, 'ln-receiver-peer');
     const lnPayerPeer = requireFlag(flags, 'ln-payer-peer');
+    const platformFeeBps = maybeInt(requireFlag(flags, 'platform-fee-bps'), 'platform-fee-bps');
+    const tradeFeeBps = maybeInt(requireFlag(flags, 'trade-fee-bps'), 'trade-fee-bps');
+    const tradeFeeCollector = requireFlag(flags, 'trade-fee-collector');
+    const platformFeeCollector = flags.get('platform-fee-collector')
+      ? String(flags.get('platform-fee-collector')).trim()
+      : null;
     const termsValidUntil = maybeInt(flags.get('terms-valid-until-unix'), 'terms-valid-until-unix');
 
     const unsigned = createUnsignedEnvelope({
@@ -847,6 +853,10 @@ async function main() {
         sol_recipient: solRecipient,
         sol_refund: solRefund,
         sol_refund_after_unix: solRefundAfter,
+        platform_fee_bps: platformFeeBps,
+        trade_fee_bps: tradeFeeBps,
+        trade_fee_collector: tradeFeeCollector,
+        platform_fee_collector: platformFeeCollector || undefined,
         ln_receiver_peer: lnReceiverPeer,
         ln_payer_peer: lnPayerPeer,
         terms_valid_until_unix: termsValidUntil || undefined,

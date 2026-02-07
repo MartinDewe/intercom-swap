@@ -72,7 +72,9 @@ export async function verifyLnUsdtEscrowOnchain({
     return { ok: false, error: 'escrow account not found on chain', state: null };
   }
 
-  if (state.v !== 2) return { ok: false, error: `escrow state version unsupported v=${state.v}`, state };
+  if (![2, 3].includes(state.v)) {
+    return { ok: false, error: `escrow state version unsupported v=${state.v}`, state };
+  }
   if (state.status !== 0) {
     return { ok: false, error: `escrow is not active (status=${state.status})`, state };
   }

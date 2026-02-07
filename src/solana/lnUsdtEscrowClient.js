@@ -12,10 +12,11 @@ import {
   getAssociatedTokenAddress,
 } from '@solana/spl-token';
 
-export const LN_USDT_ESCROW_PROGRAM_ID = new PublicKey('evYHPt33hCYHNm7iFHAHXmSkYrEoDnBSv69MHwLfYyK');
+export const LN_USDT_ESCROW_PROGRAM_ID = new PublicKey('4RS6xpspM1V2K7FKSqeSH6VVaZbtzHzhJqacwrz8gJrF');
 
 const ESCROW_SEED = Buffer.from('escrow');
 const CONFIG_SEED = Buffer.from('config');
+const TRADE_CONFIG_SEED = Buffer.from('trade_config');
 
 function hexToBytes(hex) {
   const h = String(hex || '').trim().toLowerCase();
@@ -59,12 +60,27 @@ export function deriveConfigPda(programId = LN_USDT_ESCROW_PROGRAM_ID) {
   return { pda, bump };
 }
 
+export function deriveTradeConfigPda(feeCollector, programId = LN_USDT_ESCROW_PROGRAM_ID) {
+  if (!(feeCollector instanceof PublicKey)) throw new Error('feeCollector must be a PublicKey');
+  const [pda, bump] = PublicKey.findProgramAddressSync(
+    [TRADE_CONFIG_SEED, Buffer.from(feeCollector.toBytes())],
+    programId
+  );
+  return { pda, bump };
+}
+
 export async function deriveVaultAta(escrowPda, mint) {
   return getAssociatedTokenAddress(mint, escrowPda, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
 }
 
+// Platform fee vault ATA is owned by config PDA.
 export async function deriveFeeVaultAta(configPda, mint) {
   return getAssociatedTokenAddress(mint, configPda, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
+}
+
+// Trade fee vault ATA is owned by trade config PDA.
+export async function deriveTradeFeeVaultAta(tradeConfigPda, mint) {
+  return getAssociatedTokenAddress(mint, tradeConfigPda, true, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
 }
 
 export function buildInitInstruction({
@@ -73,13 +89,24 @@ export function buildInitInstruction({
   refund,
   refundAfterUnix,
   amount,
+  expectedPlatformFeeBps,
+  expectedTradeFeeBps,
+  tradeFeeCollector,
   payer,
   payerTokenAccount,
   mint,
+  vault,
+  platformFeeVaultAta,
+  tradeConfigPda,
+  tradeFeeVaultAta,
   programId = LN_USDT_ESCROW_PROGRAM_ID,
 }) {
   const { pda: escrowPda } = deriveEscrowPda(paymentHashHex, programId);
   const { pda: configPda } = deriveConfigPda(programId);
+  const tradeCollectorPk = tradeFeeCollector;
+  if (!(tradeCollectorPk instanceof PublicKey)) throw new Error('tradeFeeCollector must be a PublicKey');
+  const wantTradeCfg = deriveTradeConfigPda(tradeCollectorPk, programId).pda;
+  if (!wantTradeCfg.equals(tradeConfigPda)) throw new Error('tradeConfigPda mismatch (derived vs provided)');
   const paymentHash = hexToBytes(paymentHashHex);
   const data = Buffer.concat([
     Buffer.from([0]), // Init tag
@@ -88,26 +115,30 @@ export function buildInitInstruction({
     Buffer.from(refund.toBytes()),
     i64Le(refundAfterUnix),
     u64Le(amount),
+    u16Le(expectedPlatformFeeBps),
+    u16Le(expectedTradeFeeBps),
+    Buffer.from(tradeCollectorPk.toBytes()),
   ]);
 
-  return (vault, feeVaultAta) =>
-    new TransactionInstruction({
-      programId,
-      keys: [
-        { pubkey: payer, isSigner: true, isWritable: true },
-        { pubkey: payerTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: escrowPda, isSigner: false, isWritable: true },
-        { pubkey: vault, isSigner: false, isWritable: true },
-        { pubkey: mint, isSigner: false, isWritable: false },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-        { pubkey: configPda, isSigner: false, isWritable: false },
-        { pubkey: feeVaultAta, isSigner: false, isWritable: true },
-      ],
-      data,
-    });
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: payerTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: escrowPda, isSigner: false, isWritable: true },
+      { pubkey: vault, isSigner: false, isWritable: true },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: configPda, isSigner: false, isWritable: false },
+      { pubkey: platformFeeVaultAta, isSigner: false, isWritable: true },
+      { pubkey: tradeConfigPda, isSigner: false, isWritable: false },
+      { pubkey: tradeFeeVaultAta, isSigner: false, isWritable: true },
+    ],
+    data,
+  });
 }
 
 export function buildClaimInstruction({
@@ -115,7 +146,8 @@ export function buildClaimInstruction({
   paymentHashHex,
   recipient,
   recipientTokenAccount,
-  feeVaultAta,
+  platformFeeVaultAta,
+  tradeFeeVaultAta,
   programId = LN_USDT_ESCROW_PROGRAM_ID,
 }) {
   const { pda: escrowPda } = deriveEscrowPda(paymentHashHex, programId);
@@ -131,7 +163,8 @@ export function buildClaimInstruction({
         { pubkey: escrowPda, isSigner: false, isWritable: true },
         { pubkey: vault, isSigner: false, isWritable: true },
         { pubkey: recipientTokenAccount, isSigner: false, isWritable: true },
-        { pubkey: feeVaultAta, isSigner: false, isWritable: true },
+        { pubkey: platformFeeVaultAta, isSigner: false, isWritable: true },
+        { pubkey: tradeFeeVaultAta, isSigner: false, isWritable: true },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
       data,
@@ -225,6 +258,48 @@ export function decodeEscrowState(data) {
     };
   }
 
+  if (v === 3) {
+    if (buf.length < 263) throw new Error('Escrow account too small (v3)');
+    const status = buf.readUInt8(1);
+    const paymentHash = buf.subarray(2, 34);
+    const recipient = new PublicKey(buf.subarray(34, 66));
+    const refund = new PublicKey(buf.subarray(66, 98));
+    const refundAfter = buf.readBigInt64LE(98);
+    const mint = new PublicKey(buf.subarray(106, 138));
+    const netAmount = buf.readBigUInt64LE(138);
+    const platformFeeAmount = buf.readBigUInt64LE(146);
+    const platformFeeBps = buf.readUInt16LE(154);
+    const platformFeeCollector = new PublicKey(buf.subarray(156, 188));
+    const tradeFeeAmount = buf.readBigUInt64LE(188);
+    const tradeFeeBps = buf.readUInt16LE(196);
+    const tradeFeeCollector = new PublicKey(buf.subarray(198, 230));
+    const vault = new PublicKey(buf.subarray(230, 262));
+    const bump = buf.readUInt8(262);
+    return {
+      v,
+      status,
+      paymentHashHex: paymentHash.toString('hex'),
+      recipient,
+      refund,
+      refundAfter,
+      mint,
+      amount: netAmount, // backwards compatible alias
+      netAmount,
+      platformFeeAmount,
+      platformFeeBps,
+      platformFeeCollector,
+      tradeFeeAmount,
+      tradeFeeBps,
+      tradeFeeCollector,
+      // Backwards-compatible fields expected by older code paths:
+      feeAmount: platformFeeAmount + tradeFeeAmount,
+      feeBps: platformFeeBps + tradeFeeBps,
+      feeCollector: platformFeeCollector, // platform collector (legacy name)
+      vault,
+      bump,
+    };
+  }
+
   throw new Error(`Unsupported escrow version v=${v}`);
 }
 
@@ -240,11 +315,35 @@ export function decodeConfigState(data) {
   return { v, authority, feeCollector, feeBps, bump };
 }
 
+export function decodeTradeConfigState(data) {
+  const buf = Buffer.from(data);
+  if (buf.length < 68) throw new Error('TradeConfig account too small');
+  const v = buf.readUInt8(0);
+  if (v !== 1) throw new Error(`Unsupported trade config version v=${v}`);
+  const authority = new PublicKey(buf.subarray(1, 33));
+  const feeCollector = new PublicKey(buf.subarray(33, 65));
+  const feeBps = buf.readUInt16LE(65);
+  const bump = buf.readUInt8(67);
+  return { v, authority, feeCollector, feeBps, bump };
+}
+
 export async function getConfigState(connection, programId = LN_USDT_ESCROW_PROGRAM_ID, commitment = 'confirmed') {
   const { pda } = deriveConfigPda(programId);
   const info = await connection.getAccountInfo(pda, commitment);
   if (!info) return null;
   return decodeConfigState(info.data);
+}
+
+export async function getTradeConfigState(
+  connection,
+  feeCollector,
+  programId = LN_USDT_ESCROW_PROGRAM_ID,
+  commitment = 'confirmed'
+) {
+  const { pda } = deriveTradeConfigPda(feeCollector, programId);
+  const info = await connection.getAccountInfo(pda, commitment);
+  if (!info) return null;
+  return decodeTradeConfigState(info.data);
 }
 
 export async function getEscrowState(
@@ -259,6 +358,88 @@ export async function getEscrowState(
   return decodeEscrowState(info.data);
 }
 
+export async function initTradeConfigTx({
+  connection,
+  payer,
+  feeCollector,
+  feeBps,
+  programId = LN_USDT_ESCROW_PROGRAM_ID,
+}) {
+  const { pda: tradeConfigPda } = deriveTradeConfigPda(feeCollector, programId);
+  const data = Buffer.concat([Buffer.from([6]), Buffer.from(feeCollector.toBytes()), u16Le(feeBps)]);
+  const ix = new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: tradeConfigPda, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  const tx = new Transaction().add(ix);
+  tx.feePayer = payer.publicKey;
+  const latest = await connection.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = latest.blockhash;
+  tx.sign(payer);
+  return { tx, tradeConfigPda };
+}
+
+export async function setTradeConfigTx({
+  connection,
+  authority,
+  feeCollector,
+  feeBps,
+  programId = LN_USDT_ESCROW_PROGRAM_ID,
+}) {
+  const { pda: tradeConfigPda } = deriveTradeConfigPda(feeCollector, programId);
+  const data = Buffer.concat([Buffer.from([7]), Buffer.from(feeCollector.toBytes()), u16Le(feeBps)]);
+  const ix = new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: authority.publicKey, isSigner: true, isWritable: false },
+      { pubkey: tradeConfigPda, isSigner: false, isWritable: true },
+    ],
+    data,
+  });
+  const tx = new Transaction().add(ix);
+  tx.feePayer = authority.publicKey;
+  const latest = await connection.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = latest.blockhash;
+  tx.sign(authority);
+  return { tx, tradeConfigPda };
+}
+
+export async function withdrawTradeFeesTx({
+  connection,
+  feeCollector,
+  feeCollectorTokenAccount,
+  mint,
+  amount,
+  programId = LN_USDT_ESCROW_PROGRAM_ID,
+}) {
+  const { pda: tradeConfigPda } = deriveTradeConfigPda(feeCollector.publicKey, programId);
+  const feeVaultAta = await deriveTradeFeeVaultAta(tradeConfigPda, mint);
+  const data = Buffer.concat([Buffer.from([8]), u64Le(amount ?? 0)]);
+  const ix = new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: feeCollector.publicKey, isSigner: true, isWritable: false },
+      { pubkey: tradeConfigPda, isSigner: false, isWritable: false },
+      { pubkey: feeVaultAta, isSigner: false, isWritable: true },
+      { pubkey: feeCollectorTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  const tx = new Transaction().add(ix);
+  tx.feePayer = feeCollector.publicKey;
+  const latest = await connection.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = latest.blockhash;
+  tx.sign(feeCollector);
+  return { tx, feeVaultAta, tradeConfigPda };
+}
+
 export async function createEscrowTx({
   connection,
   payer,
@@ -269,35 +450,46 @@ export async function createEscrowTx({
   refund,
   refundAfterUnix,
   amount,
+  expectedPlatformFeeBps,
+  expectedTradeFeeBps,
+  tradeFeeCollector,
   programId = LN_USDT_ESCROW_PROGRAM_ID,
 }) {
   const { pda: escrowPda } = deriveEscrowPda(paymentHashHex, programId);
   const { pda: configPda } = deriveConfigPda(programId);
   const vault = await deriveVaultAta(escrowPda, mint);
-  const feeVaultAta = await deriveFeeVaultAta(configPda, mint);
+  const platformFeeVaultAta = await deriveFeeVaultAta(configPda, mint);
+  const { pda: tradeConfigPda } = deriveTradeConfigPda(tradeFeeCollector, programId);
+  const tradeFeeVaultAta = await deriveTradeFeeVaultAta(tradeConfigPda, mint);
 
-  const initIxFactory = buildInitInstruction({
+  const initIx = buildInitInstruction({
     paymentHashHex,
     recipient,
     refund,
     refundAfterUnix,
     amount,
+    expectedPlatformFeeBps,
+    expectedTradeFeeBps,
+    tradeFeeCollector,
     payer: payer.publicKey,
     payerTokenAccount,
     mint,
+    vault,
+    platformFeeVaultAta,
+    tradeConfigPda,
+    tradeFeeVaultAta,
     programId,
   });
 
   const tx = new Transaction();
   // Note: The program CPI creates the escrow PDA and vault ATA; the transaction contains only the init instruction.
-  const initIx = initIxFactory(vault, feeVaultAta);
   tx.add(initIx);
 
   tx.feePayer = payer.publicKey;
   const latest = await connection.getLatestBlockhash('confirmed');
   tx.recentBlockhash = latest.blockhash;
   tx.sign(payer);
-  return { tx, escrowPda, vault, feeVaultAta };
+  return { tx, escrowPda, vault, platformFeeVaultAta, tradeConfigPda, tradeFeeVaultAta };
 }
 
 export async function claimEscrowTx({
@@ -307,18 +499,22 @@ export async function claimEscrowTx({
   mint,
   paymentHashHex,
   preimageHex,
+  tradeFeeCollector,
   programId = LN_USDT_ESCROW_PROGRAM_ID,
 }) {
   const { pda: escrowPda } = deriveEscrowPda(paymentHashHex, programId);
   const { pda: configPda } = deriveConfigPda(programId);
   const vault = await deriveVaultAta(escrowPda, mint);
-  const feeVaultAta = await deriveFeeVaultAta(configPda, mint);
+  const platformFeeVaultAta = await deriveFeeVaultAta(configPda, mint);
+  const { pda: tradeConfigPda } = deriveTradeConfigPda(tradeFeeCollector, programId);
+  const tradeFeeVaultAta = await deriveTradeFeeVaultAta(tradeConfigPda, mint);
   const claimIxFactory = buildClaimInstruction({
     preimageHex,
     paymentHashHex,
     recipient: recipient.publicKey,
     recipientTokenAccount,
-    feeVaultAta,
+    platformFeeVaultAta,
+    tradeFeeVaultAta,
     programId,
   });
   const tx = new Transaction().add(claimIxFactory(vault));
@@ -326,7 +522,7 @@ export async function claimEscrowTx({
   const latest = await connection.getLatestBlockhash('confirmed');
   tx.recentBlockhash = latest.blockhash;
   tx.sign(recipient);
-  return { tx, escrowPda, vault, feeVaultAta };
+  return { tx, escrowPda, vault, platformFeeVaultAta, tradeConfigPda, tradeFeeVaultAta };
 }
 
 export async function refundEscrowTx({

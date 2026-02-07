@@ -786,27 +786,52 @@ Use a dedicated swap rendezvous channel (instead of `0000intercom`) for RFQs/quo
 - Recommended: `0000intercomswapbtcusdt`
 - All `otc-*` scripts default to `--otc-channel 0000intercomswapbtcusdt` unless overridden.
 
-### Solana Program Fees (Program-Wide)
-The Solana escrow program includes a **single** program-wide `config` PDA (seed `b"config"`) that controls fees:
-- `fee_bps` is capped at **2500 bps (25%)**.
-- The depositor funds `net_amount + fee_amount`, while the recipient receives exactly `net_amount`.
-- Fees accrue into a **fee-vault ATA** owned by the config PDA (per mint), and the fee collector can withdraw them at any time.
+### Solana Program Fees (Platform + Trade Fee Receiver)
+The Solana escrow program charges fees **on top** (paid by the depositor):
+- The recipient receives exactly `net_amount`.
+- The depositor funds: `net_amount + platform_fee_amount + trade_fee_amount`.
+
+There are 2 independent fee configs:
+1) Platform fee (program-wide):
+- `config` PDA (seed `b"config"`)
+- fields: `fee_collector`, `fee_bps` (capped at **2500 bps (25%)**)
+- fees accrue into a **platform fee-vault ATA** owned by the `config` PDA (per mint)
+2) Trade fee (per fee receiver):
+- `trade_config` PDA (seed `b"trade_config"`, keyed by `fee_collector`)
+- fields: `fee_collector`, `fee_bps` (capped at **2500 bps (25%)**)
+- fees accrue into a **trade fee-vault ATA** owned by the `trade_config` PDA (per mint)
+
+Safety rule:
+- `platform_fee_bps + trade_fee_bps <= 2500` must hold (25% total cap).
 
 Operational notes:
-- The `config` PDA must be initialized once per cluster before `init_escrow` will work.
-- In this fork, the config authority and `fee_collector` are intentionally the **same key** (the fee collector controls the config).
+- The platform `config` PDA must be initialized once per cluster before `init_escrow` will work.
+- Each `trade_config` PDA must be initialized once per trade-fee collector before it can be used in swaps.
+- In this fork, each config enforces `authority == fee_collector` (the collector controls config + withdrawals).
 
-Operator tooling:
-- Inspect config:
+Operator tooling (`scripts/escrowctl.*`):
+- Inspect platform config:
   - `scripts/escrowctl.sh config-get --solana-rpc-url <rpc>`
-- Initialize or update fees (fee collector keypair is the config authority):
-  - `scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json --fee-bps 100`
-  - `scripts/escrowctl.sh config-set --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json --fee-bps 100`
+- Initialize or update platform fee (default recommendation: **0.5% = 50 bps**):
+  - `scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/.../platform-fee-collector.json --fee-bps 50`
+  - `scripts/escrowctl.sh config-set  --solana-rpc-url <rpc> --solana-keypair onchain/.../platform-fee-collector.json --fee-bps 50`
   - Add `--simulate 1` to dry-run on the RPC without broadcasting.
-- Withdraw fees (per mint):
+- Inspect trade config:
+  - `scripts/escrowctl.sh trade-config-get --solana-rpc-url <rpc> --fee-collector <pubkey>`
+- Initialize or update trade fee (default recommendation: **0.5% = 50 bps**):
+  - `scripts/escrowctl.sh trade-config-init --solana-rpc-url <rpc> --solana-keypair onchain/.../trade-fee-collector.json --fee-bps 50`
+  - `scripts/escrowctl.sh trade-config-set  --solana-rpc-url <rpc> --solana-keypair onchain/.../trade-fee-collector.json --fee-bps 50`
+- Withdraw platform fees (per mint):
   - `scripts/escrowctl.sh fees-balance --solana-rpc-url <rpc> --mint <mint>`
-  - `scripts/escrowctl.sh fees-withdraw --solana-rpc-url <rpc> --solana-keypair onchain/.../keypair.json --mint <mint> --amount 0`
+  - `scripts/escrowctl.sh fees-withdraw --solana-rpc-url <rpc> --solana-keypair onchain/.../platform-fee-collector.json --mint <mint> --amount 0`
     - `--amount 0` means “withdraw all”.
+- Withdraw trade fees (per mint; trade fee collector keypair):
+  - `scripts/escrowctl.sh trade-fees-balance --solana-rpc-url <rpc> --fee-collector <pubkey> --mint <mint>`
+  - `scripts/escrowctl.sh trade-fees-withdraw --solana-rpc-url <rpc> --solana-keypair onchain/.../trade-fee-collector.json --mint <mint> --amount 0`
+
+Swap protocol integration:
+- Maker includes `platform_fee_*` and `trade_fee_*` fields in `TERMS`, so both sides agree on fees and the taker can claim deterministically.
+- Maker can override the trade-fee receiver with `--solana-trade-fee-collector <pubkey>`; otherwise it defaults to the platform fee collector.
 
 For operators/agents, use:
 - `scripts/swapctl.sh verify-prepay --terms-json @terms.json --invoice-json @invoice.json --escrow-json @escrow.json --solana-rpc-url <rpc>`  
@@ -896,19 +921,22 @@ Goal: a fully scripted path so the only manual input is "fund these addresses" (
 Solana (local keypairs only):
 ```bash
 # Generate local keypairs (store them under onchain/, never commit).
-scripts/solctl.sh keygen --out onchain/solana/keypairs/swap-fee-collector.json
+scripts/solctl.sh keygen --out onchain/solana/keypairs/swap-platform-fee-collector.json
+scripts/solctl.sh keygen --out onchain/solana/keypairs/swap-trade-fee-collector.json
 scripts/solctl.sh keygen --out onchain/solana/keypairs/swap-maker-sol.json
 scripts/solctl.sh keygen --out onchain/solana/keypairs/swap-taker-sol.json
 
 # Print pubkeys (fund these with SOL on the target cluster).
-scripts/solctl.sh address --keypair onchain/solana/keypairs/swap-fee-collector.json
+scripts/solctl.sh address --keypair onchain/solana/keypairs/swap-platform-fee-collector.json
+scripts/solctl.sh address --keypair onchain/solana/keypairs/swap-trade-fee-collector.json
 scripts/solctl.sh address --keypair onchain/solana/keypairs/swap-maker-sol.json
 scripts/solctl.sh address --keypair onchain/solana/keypairs/swap-taker-sol.json
 
 # For devnet/testnet only: airdrop SOL for quick testing.
 scripts/solctl.sh airdrop --rpc-url https://api.devnet.solana.com --keypair onchain/solana/keypairs/swap-maker-sol.json --sol 2
 scripts/solctl.sh airdrop --rpc-url https://api.devnet.solana.com --keypair onchain/solana/keypairs/swap-taker-sol.json --sol 2
-scripts/solctl.sh airdrop --rpc-url https://api.devnet.solana.com --keypair onchain/solana/keypairs/swap-fee-collector.json --sol 2
+scripts/solctl.sh airdrop --rpc-url https://api.devnet.solana.com --keypair onchain/solana/keypairs/swap-platform-fee-collector.json --sol 2
+scripts/solctl.sh airdrop --rpc-url https://api.devnet.solana.com --keypair onchain/solana/keypairs/swap-trade-fee-collector.json --sol 2
 
 # Ensure USDT ATAs exist and print them (send USDT to the maker ATA for inventory).
 scripts/solctl.sh token-ata --rpc-url <rpc> --keypair onchain/solana/keypairs/swap-maker-sol.json --mint <USDT_MINT> --create 1
@@ -932,12 +960,15 @@ scripts/solprogctl.sh keypair-pubkey --program-keypair onchain/solana/program/ln
 # Deploy (devnet example). Payer + upgrade authority are local keypairs (no custodial APIs).
 scripts/solprogctl.sh deploy \
   --rpc-url https://api.devnet.solana.com \
-  --payer onchain/solana/keypairs/swap-fee-collector.json \
+  --payer onchain/solana/keypairs/swap-platform-fee-collector.json \
   --program-keypair onchain/solana/program/ln_usdt_escrow-keypair.json \
-  --upgrade-authority onchain/solana/keypairs/swap-fee-collector.json
+  --upgrade-authority onchain/solana/keypairs/swap-platform-fee-collector.json
 
-# Initialize fee config once per cluster (example: 1% = 100 bps).
-scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-fee-collector.json --fee-bps 100
+# Initialize platform fee config once per cluster (example: 0.5% = 50 bps).
+scripts/escrowctl.sh config-init --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-platform-fee-collector.json --fee-bps 50
+
+# Initialize trade fee config for the desired trade-fee receiver (example: 0.5% = 50 bps).
+scripts/escrowctl.sh trade-config-init --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-trade-fee-collector.json --fee-bps 50
 
 # Confirm config:
 scripts/escrowctl.sh config-get --solana-rpc-url <rpc>
@@ -987,7 +1018,8 @@ scripts/swapctl-peer.sh swap-maker 49222 svc-announce-loop \
 scripts/otc-maker-peer.sh swap-maker 49222 \
   --run-swap 1 \
   --ln-backend cli --ln-network bitcoin \
-  --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-maker-sol.json --solana-mint <USDT_MINT>
+  --solana-rpc-url <rpc> --solana-keypair onchain/solana/keypairs/swap-maker-sol.json --solana-mint <USDT_MINT> \
+  --solana-trade-fee-collector <TRADE_FEE_COLLECTOR_PUBKEY>
 
 scripts/otc-taker-peer.sh swap-taker 49223 \
   --run-swap 1 \

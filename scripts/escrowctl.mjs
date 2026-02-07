@@ -14,10 +14,16 @@ import {
   LN_USDT_ESCROW_PROGRAM_ID,
   deriveConfigPda,
   deriveFeeVaultAta,
+  deriveTradeConfigPda,
+  deriveTradeFeeVaultAta,
   getConfigState,
+  getTradeConfigState,
   getEscrowState,
   initConfigTx,
+  initTradeConfigTx,
   setConfigTx,
+  setTradeConfigTx,
+  withdrawTradeFeesTx,
   withdrawFeesTx,
 } from '../src/solana/lnUsdtEscrowClient.js';
 
@@ -44,6 +50,11 @@ Commands:
   config-set  --fee-bps <n> [--fee-collector <pubkey>] [--simulate 0|1]
   fees-balance --mint <pubkey>
   fees-withdraw --mint <pubkey> [--amount <u64>] [--create-ata 0|1] [--simulate 0|1]
+  trade-config-get --fee-collector <pubkey>
+  trade-config-init --fee-bps <n> [--fee-collector <pubkey>] [--simulate 0|1]
+  trade-config-set  --fee-bps <n> [--fee-collector <pubkey>] [--simulate 0|1]
+  trade-fees-balance --fee-collector <pubkey> --mint <pubkey>
+  trade-fees-withdraw --mint <pubkey> [--amount <u64>] [--create-ata 0|1] [--simulate 0|1]
   escrow-get --payment-hash <hex32>
 
 Notes:
@@ -152,6 +163,35 @@ async function main() {
     return;
   }
 
+  if (cmd === 'trade-config-get') {
+    const feeCollectorStr = requireFlag(flags, 'fee-collector').trim();
+    const feeCollector = new PublicKey(feeCollectorStr);
+    const { pda: tradeConfigPda } = deriveTradeConfigPda(feeCollector, programId);
+    const state = await pool.call((connection) => getTradeConfigState(connection, feeCollector, programId, commitment), { label: 'trade-config-get' });
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          type: 'trade_config_state',
+          program_id: programId.toBase58(),
+          trade_config_pda: tradeConfigPda.toBase58(),
+          fee_collector: feeCollector.toBase58(),
+          state: state
+            ? {
+                v: state.v,
+                authority: state.authority.toBase58(),
+                fee_collector: state.feeCollector.toBase58(),
+                fee_bps: state.feeBps,
+                bump: state.bump,
+              }
+            : null,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
   if (cmd === 'escrow-get') {
     const paymentHashHex = requireFlag(flags, 'payment-hash').trim().toLowerCase();
     const state = await pool.call((connection) => getEscrowState(connection, paymentHashHex, programId, commitment), { label: 'escrow-get' });
@@ -205,6 +245,37 @@ async function main() {
           program_id: programId.toBase58(),
           mint: mint.toBase58(),
           config_pda: configPda.toBase58(),
+          fee_vault_ata: feeVaultAta.toBase58(),
+          amount: amount.toString(),
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
+  if (cmd === 'trade-fees-balance') {
+    const feeCollectorStr = requireFlag(flags, 'fee-collector').trim();
+    const feeCollector = new PublicKey(feeCollectorStr);
+    const mintStr = requireFlag(flags, 'mint').trim();
+    const mint = new PublicKey(mintStr);
+    const { pda: tradeConfigPda } = deriveTradeConfigPda(feeCollector, programId);
+    const feeVaultAta = await deriveTradeFeeVaultAta(tradeConfigPda, mint);
+    let amount = 0n;
+    try {
+      const acct = await pool.call((connection) => getAccount(connection, feeVaultAta, commitment), { label: 'trade-fees-balance' });
+      amount = acct.amount;
+    } catch (_e) {
+      amount = 0n;
+    }
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          type: 'trade_fee_vault_balance',
+          program_id: programId.toBase58(),
+          mint: mint.toBase58(),
+          trade_config_pda: tradeConfigPda.toBase58(),
           fee_vault_ata: feeVaultAta.toBase58(),
           amount: amount.toString(),
         },
@@ -278,6 +349,65 @@ async function main() {
     return;
   }
 
+  if (cmd === 'trade-config-init' || cmd === 'trade-config-set') {
+    const feeBps = parseIntFlag(requireFlag(flags, 'fee-bps'), 'fee-bps');
+    const feeCollectorStr = (flags.get('fee-collector') && String(flags.get('fee-collector')).trim()) || '';
+    const feeCollector = feeCollectorStr ? new PublicKey(feeCollectorStr) : signer.publicKey;
+    const simulate = parseBool(flags.get('simulate'), false);
+
+    if (!feeCollector.equals(signer.publicKey)) {
+      die('Invalid --fee-collector: trade config requires fee_collector == authority (signer).');
+    }
+
+    const build = cmd === 'trade-config-init' ? initTradeConfigTx : setTradeConfigTx;
+    const { tx, tradeConfigPda } = await pool.call(
+      (connection) =>
+        build({
+          connection,
+          ...(cmd === 'trade-config-init' ? { payer: signer } : { authority: signer }),
+          feeCollector,
+          feeBps,
+          programId,
+        }),
+      { label: cmd }
+    );
+
+    if (simulate) {
+      const sim = await pool.call((connection) => connection.simulateTransaction(tx, { commitment }), { label: `${cmd}:simulate` });
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            type: 'simulate',
+            cmd,
+            program_id: programId.toBase58(),
+            trade_config_pda: tradeConfigPda.toBase58(),
+            result: sim?.value ?? null,
+          },
+          null,
+          2
+        )}\n`
+      );
+      return;
+    }
+
+    const sig = await pool.call((connection) => sendAndConfirm(connection, tx, commitment), { label: cmd });
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          type: cmd === 'trade-config-init' ? 'trade_config_inited' : 'trade_config_set',
+          program_id: programId.toBase58(),
+          trade_config_pda: tradeConfigPda.toBase58(),
+          fee_collector: feeCollector.toBase58(),
+          fee_bps: feeBps,
+          tx_sig: sig,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
   if (cmd === 'fees-withdraw') {
     const mintStr = requireFlag(flags, 'mint').trim();
     const mint = new PublicKey(mintStr);
@@ -337,6 +467,78 @@ async function main() {
           type: 'fees_withdrawn',
           program_id: programId.toBase58(),
           config_pda: configPda.toBase58(),
+          mint: mint.toBase58(),
+          fee_vault_ata: feeVaultAta.toBase58(),
+          dest_ata: destAta.toBase58(),
+          amount: amount.toString(),
+          tx_sig: sig,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
+  if (cmd === 'trade-fees-withdraw') {
+    const mintStr = requireFlag(flags, 'mint').trim();
+    const mint = new PublicKey(mintStr);
+    const amount = parseU64(flags.get('amount'), 'amount', 0n);
+    const createAta = parseBool(flags.get('create-ata'), true);
+    const simulate = parseBool(flags.get('simulate'), false);
+
+    const destAta = await getAssociatedTokenAddress(mint, signer.publicKey, false);
+    if (createAta) {
+      await pool.call(async (connection) => {
+        try {
+          await getAccount(connection, destAta, commitment);
+        } catch (_e) {
+          await createAssociatedTokenAccount(connection, signer, mint, signer.publicKey);
+        }
+      }, { label: 'ensure-dest-ata' });
+    }
+
+    const { tx, feeVaultAta, tradeConfigPda } = await pool.call(
+      (connection) =>
+        withdrawTradeFeesTx({
+          connection,
+          feeCollector: signer,
+          feeCollectorTokenAccount: destAta,
+          mint,
+          amount,
+          programId,
+        }),
+      { label: 'trade-fees-withdraw:build' }
+    );
+
+    if (simulate) {
+      const sim = await pool.call((connection) => connection.simulateTransaction(tx, { commitment }), { label: 'trade-fees-withdraw:simulate' });
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            type: 'simulate',
+            cmd,
+            program_id: programId.toBase58(),
+            trade_config_pda: tradeConfigPda.toBase58(),
+            fee_vault_ata: feeVaultAta.toBase58(),
+            dest_ata: destAta.toBase58(),
+            amount: amount.toString(),
+            result: sim?.value ?? null,
+          },
+          null,
+          2
+        )}\n`
+      );
+      return;
+    }
+
+    const sig = await pool.call((connection) => sendAndConfirm(connection, tx, commitment), { label: 'trade-fees-withdraw' });
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          type: 'trade_fees_withdrawn',
+          program_id: programId.toBase58(),
+          trade_config_pda: tradeConfigPda.toBase58(),
           mint: mint.toBase58(),
           fee_vault_ata: feeVaultAta.toBase58(),
           dest_ata: destAta.toBase58(),

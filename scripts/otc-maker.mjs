@@ -24,6 +24,8 @@ import { normalizeInvitePayload, normalizeWelcomePayload, createSignedInvite } f
 import { normalizeClnNetwork } from '../src/ln/cln.js';
 import {
   createEscrowTx,
+  getConfigState,
+  getTradeConfigState,
   LN_USDT_ESCROW_PROGRAM_ID,
 } from '../src/solana/lnUsdtEscrowClient.js';
 import { readSolanaKeypair } from '../src/solana/keypair.js';
@@ -209,6 +211,9 @@ async function main() {
   const solMintStr = flags.get('solana-mint') ? String(flags.get('solana-mint')).trim() : '';
   const solDecimals = parseIntFlag(flags.get('solana-decimals'), 'solana-decimals', 6);
   const solProgramIdStr = flags.get('solana-program-id') ? String(flags.get('solana-program-id')).trim() : '';
+  const solTradeFeeCollectorStr = flags.get('solana-trade-fee-collector')
+    ? String(flags.get('solana-trade-fee-collector')).trim()
+    : '';
 
   const lnBackend = (flags.get('ln-backend') && String(flags.get('ln-backend')).trim()) || 'docker';
   const lnComposeFile = (flags.get('ln-compose-file') && String(flags.get('ln-compose-file')).trim()) || defaultComposeFile;
@@ -275,14 +280,15 @@ async function main() {
   };
 
   const sol = runSwap
-    ? (() => {
-        const payer = readSolanaKeypair(solKeypairPath);
-        const pool = new SolanaRpcPool({ rpcUrls: solRpcUrl, commitment: 'confirmed' });
-        const mint = new PublicKey(solMintStr);
-        const programId = solProgramIdStr ? new PublicKey(solProgramIdStr) : LN_USDT_ESCROW_PROGRAM_ID;
-        return { payer, pool, mint, programId };
-      })()
-    : null;
+	    ? (() => {
+	        const payer = readSolanaKeypair(solKeypairPath);
+	        const pool = new SolanaRpcPool({ rpcUrls: solRpcUrl, commitment: 'confirmed' });
+	        const mint = new PublicKey(solMintStr);
+	        const programId = solProgramIdStr ? new PublicKey(solProgramIdStr) : LN_USDT_ESCROW_PROGRAM_ID;
+	        const tradeFeeCollector = solTradeFeeCollectorStr ? new PublicKey(solTradeFeeCollectorStr) : null;
+	        return { payer, pool, mint, programId, tradeFeeCollector };
+	      })()
+	    : null;
 
   let done = false;
 
@@ -343,6 +349,34 @@ async function main() {
 
   const createAndSendTerms = async (ctx) => {
     const nowSec = Math.floor(Date.now() / 1000);
+
+    // Fees are part of the agreed terms.
+    // Platform fee comes from the program config PDA.
+    // Trade fee comes from a trade-config PDA keyed by trade_fee_collector.
+    let platformFeeBps = 0;
+    let platformFeeCollector = null;
+    let tradeFeeBps = 0;
+    let tradeFeeCollector = null;
+    if (runSwap) {
+      const cfg = await sol.pool.call(
+        (connection) => getConfigState(connection, sol.programId, 'confirmed'),
+        { label: 'maker:get-config' }
+      );
+      if (!cfg) throw new Error('Solana escrow program config is not initialized (run escrowctl config-init first)');
+      platformFeeBps = Number(cfg.feeBps || 0);
+      platformFeeCollector = cfg.feeCollector;
+
+      tradeFeeCollector = sol.tradeFeeCollector || cfg.feeCollector;
+      const tradeCfg = await sol.pool.call(
+        (connection) => getTradeConfigState(connection, tradeFeeCollector, sol.programId, 'confirmed'),
+        { label: 'maker:get-trade-config' }
+      );
+      if (!tradeCfg) {
+        throw new Error(`Trade fee config not initialized for ${tradeFeeCollector.toBase58()}`);
+      }
+      tradeFeeBps = Number(tradeCfg.feeBps || 0);
+    }
+
     const termsUnsigned = createUnsignedEnvelope({
       v: 1,
       kind: KIND.TERMS,
@@ -357,6 +391,10 @@ async function main() {
         sol_recipient: ctx.solRecipient,
         sol_refund: sol.payer.publicKey.toBase58(),
         sol_refund_after_unix: nowSec + solRefundAfterSec,
+        platform_fee_bps: platformFeeBps,
+        platform_fee_collector: platformFeeCollector ? platformFeeCollector.toBase58() : null,
+        trade_fee_bps: tradeFeeBps,
+        trade_fee_collector: tradeFeeCollector ? tradeFeeCollector.toBase58() : null,
         ln_receiver_peer: makerPubkey,
         ln_payer_peer: ctx.inviteePubKey,
         terms_valid_until_unix: nowSec + termsValidSec,
@@ -455,7 +493,7 @@ async function main() {
       lnInvSigned
     );
 
-    // Solana escrow (locks net + fee, but terms.usdt_amount is the net amount).
+    // Solana escrow (locks net + platform fee + trade fee; terms.usdt_amount is the net amount).
     const refundAfterUnix = Number(ctx.trade.terms.sol_refund_after_unix);
     if (!Number.isFinite(refundAfterUnix) || refundAfterUnix <= 0) throw new Error('Invalid sol_refund_after_unix');
 
@@ -465,22 +503,25 @@ async function main() {
       { label: 'maker:ensure-ata' }
     );
 
-    const { tx: escrowTx, escrowPda, vault } = await sol.pool.call(
-      (connection) =>
-        createEscrowTx({
-          connection,
-          payer: sol.payer,
-          payerTokenAccount: payerToken,
-          mint: sol.mint,
-          paymentHashHex,
-          recipient: solRecipient,
-          refund: sol.payer.publicKey,
-          refundAfterUnix,
-          amount: BigInt(String(ctx.usdtAmount)),
-          programId: sol.programId,
-        }),
-      { label: 'maker:build-escrow-tx' }
-    );
+	    const { tx: escrowTx, escrowPda, vault } = await sol.pool.call(
+	      (connection) =>
+	        createEscrowTx({
+	          connection,
+	          payer: sol.payer,
+	          payerTokenAccount: payerToken,
+	          mint: sol.mint,
+	          paymentHashHex,
+	          recipient: solRecipient,
+	          refund: sol.payer.publicKey,
+	          refundAfterUnix,
+	          amount: BigInt(String(ctx.usdtAmount)),
+	          expectedPlatformFeeBps: Number(ctx.trade.terms.platform_fee_bps || 0),
+	          expectedTradeFeeBps: Number(ctx.trade.terms.trade_fee_bps || 0),
+	          tradeFeeCollector: new PublicKey(String(ctx.trade.terms.trade_fee_collector)),
+	          programId: sol.programId,
+	        }),
+	      { label: 'maker:build-escrow-tx' }
+	    );
     const escrowSig = await sol.pool.call((connection) => sendAndConfirm(connection, escrowTx), { label: 'maker:send-escrow-tx' });
 
     const solEscrowUnsigned = createUnsignedEnvelope({

@@ -155,6 +155,8 @@ async function main() {
       if (Number(onchain.status) !== 0) {
         die(`Escrow not active (status=${onchain.status}). Refusing to claim.`);
       }
+      const tradeFeeCollector = onchain.tradeFeeCollector || null;
+      if (!tradeFeeCollector) die('Escrow missing trade fee collector (cannot build claim).');
 
       const recipientToken = await pool.call(
         (connection) =>
@@ -176,6 +178,7 @@ async function main() {
             mint,
             paymentHashHex: hash,
             preimageHex: preimage,
+            tradeFeeCollector,
             programId,
           }),
         { label: 'claim:build-tx' }

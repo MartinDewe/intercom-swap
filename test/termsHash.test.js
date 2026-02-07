@@ -26,6 +26,9 @@ test('swap terms: hash helper matches canonical unsigned envelope hash', async (
       sol_recipient: '11111111111111111111111111111111',
       sol_refund: '11111111111111111111111111111111',
       sol_refund_after_unix: 1770000000,
+      platform_fee_bps: 50,
+      trade_fee_bps: 50,
+      trade_fee_collector: '11111111111111111111111111111111',
       ln_receiver_peer: b4a.toString(w.publicKey, 'hex'),
       ln_payer_peer: b4a.toString(w.publicKey, 'hex'),
     },
@@ -45,4 +48,3 @@ test('swap terms: hash helper matches canonical unsigned envelope hash', async (
   assert.equal(hashTermsEnvelope(termsSigned), want);
   assert.deepEqual(acceptBodyForTerms(termsSigned), { terms_hash: want });
 });
-

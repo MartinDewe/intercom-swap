@@ -42,7 +42,9 @@ import {
   claimEscrowTx,
   createEscrowTx,
   initConfigTx,
+  initTradeConfigTx,
   getEscrowState,
+  withdrawTradeFeesTx,
   withdrawFeesTx,
 } from '../src/solana/lnUsdtEscrowClient.js';
 import { openTradeReceiptsStore } from '../src/receipts/store.js';
@@ -450,23 +452,41 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   const clientToken = await createAssociatedTokenAccount(connection, solService, mint, solClient.publicKey);
   await mintTo(connection, solService, mint, serviceToken, solService, 200_000_000n);
 
-  // Program-wide fee config (1%).
+  // Program-wide fee config (platform fee 0.5%).
   const solFeeAuthority = Keypair.generate();
+  const solTradeFeeAuthority = Keypair.generate();
   const airdropFeeAuth = await connection.requestAirdrop(solFeeAuthority.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdropFeeAuth, 'confirmed');
+  const airdropTradeFeeAuth = await connection.requestAirdrop(solTradeFeeAuthority.publicKey, 2_000_000_000);
+  await connection.confirmTransaction(airdropTradeFeeAuth, 'confirmed');
   const feeCollectorToken = await createAssociatedTokenAccount(
     connection,
     solService,
     mint,
     solFeeAuthority.publicKey
   );
+  const tradeFeeCollectorToken = await createAssociatedTokenAccount(
+    connection,
+    solService,
+    mint,
+    solTradeFeeAuthority.publicKey
+  );
   const { tx: initCfgTx } = await initConfigTx({
     connection,
     payer: solFeeAuthority,
     feeCollector: solFeeAuthority.publicKey,
-    feeBps: 100,
+    feeBps: 50,
   });
   await sendAndConfirm(connection, initCfgTx);
+
+  // Trade fee config (trade fee 0.5%).
+  const { tx: initTradeCfgTx } = await initTradeConfigTx({
+    connection,
+    payer: solTradeFeeAuthority,
+    feeCollector: solTradeFeeAuthority.publicKey,
+    feeBps: 50,
+  });
+  await sendAndConfirm(connection, initTradeCfgTx);
 
   // Intercom peer identities.
   const storesDir = path.join(repoRoot, 'stores');
@@ -712,6 +732,8 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
       solServiceKeyPath,
       '--solana-mint',
       mint.toBase58(),
+      '--solana-trade-fee-collector',
+      solTradeFeeAuthority.publicKey.toBase58(),
     ],
     { label: 'maker-bot' }
   );
@@ -818,7 +840,21 @@ test('e2e: sidechannel swap protocol + LN regtest + Solana escrow', async (t) =>
   });
   await sendAndConfirm(connection, withdrawTx);
   const feeBal2 = (await getAccount(connection, feeCollectorToken, 'confirmed')).amount;
-  assert.equal(feeBal2, 1_000_000n);
+  assert.equal(feeBal2, 500_000n);
+
+  const tradeFeeBal = (await getAccount(connection, tradeFeeCollectorToken, 'confirmed')).amount;
+  assert.equal(tradeFeeBal, 0n);
+
+  const { tx: withdrawTradeTx } = await withdrawTradeFeesTx({
+    connection,
+    feeCollector: solTradeFeeAuthority,
+    feeCollectorTokenAccount: tradeFeeCollectorToken,
+    mint,
+    amount: 0n,
+  });
+  await sendAndConfirm(connection, withdrawTradeTx);
+  const tradeFeeBal2 = (await getAccount(connection, tradeFeeCollectorToken, 'confirmed')).amount;
+  assert.equal(tradeFeeBal2, 500_000n);
 
   const invoiceMsg = [...seen.alice.swap, ...seen.bob.swap].find((m) => m?.kind === KIND.LN_INVOICE);
   assert.ok(invoiceMsg, 'missing LN_INVOICE');

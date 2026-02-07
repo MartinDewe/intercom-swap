@@ -23,8 +23,10 @@ import {
   createEscrowTx,
   deriveEscrowPda,
   initConfigTx,
+  initTradeConfigTx,
   getEscrowState,
   refundEscrowTx,
+  withdrawTradeFeesTx,
   withdrawFeesTx,
 } from '../src/solana/lnUsdtEscrowClient.js';
 import { openTradeReceiptsStore } from '../src/receipts/store.js';
@@ -274,12 +276,15 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   const solAlice = Keypair.generate();
   const solBob = Keypair.generate();
   const solFeeAuthority = Keypair.generate();
+  const solTradeFeeAuthority = Keypair.generate();
   const airdropAlice = await connection.requestAirdrop(solAlice.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdropAlice, 'confirmed');
   const airdropBob = await connection.requestAirdrop(solBob.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdropBob, 'confirmed');
   const airdropFeeAuth = await connection.requestAirdrop(solFeeAuthority.publicKey, 2_000_000_000);
   await connection.confirmTransaction(airdropFeeAuth, 'confirmed');
+  const airdropTradeFeeAuth = await connection.requestAirdrop(solTradeFeeAuthority.publicKey, 2_000_000_000);
+  await connection.confirmTransaction(airdropTradeFeeAuth, 'confirmed');
 
   await retry(async () => {
     const bal = await connection.getBalance(solAlice.publicKey, 'confirmed');
@@ -301,17 +306,32 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     mint,
     solFeeAuthority.publicKey
   );
+  const tradeFeeCollectorToken = await createAssociatedTokenAccount(
+    connection,
+    solAlice,
+    mint,
+    solTradeFeeAuthority.publicKey
+  );
   // Mint enough for multiple escrows across subtests.
   await mintTo(connection, solAlice, mint, aliceToken, solAlice, 200_000_000n); // 200 USDT (6 decimals)
 
-  // Initialize program-wide config (1% fee).
+  // Initialize program-wide config (platform fee 0.5%).
   const { tx: initCfgTx } = await initConfigTx({
     connection,
     payer: solFeeAuthority,
     feeCollector: solFeeAuthority.publicKey,
-    feeBps: 100,
+    feeBps: 50,
   });
   await sendAndConfirm(connection, initCfgTx);
+
+  // Initialize trade fee config (trade fee 0.5%).
+  const { tx: initTradeCfgTx } = await initTradeConfigTx({
+    connection,
+    payer: solTradeFeeAuthority,
+    feeCollector: solTradeFeeAuthority.publicKey,
+    feeBps: 50,
+  });
+  await sendAndConfirm(connection, initTradeCfgTx);
 
   // Create escrow keyed to LN payment_hash.
   const now = Math.floor(Date.now() / 1000);
@@ -326,6 +346,9 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     refund: solAlice.publicKey,
     refundAfterUnix: refundAfter,
     amount: 100_000_000n,
+    expectedPlatformFeeBps: 50,
+    expectedTradeFeeBps: 50,
+    tradeFeeCollector: solTradeFeeAuthority.publicKey,
   });
   await sendAndConfirm(connection, escrowTx);
 
@@ -336,9 +359,12 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   assert.equal(state.recipient.toBase58(), solBob.publicKey.toBase58());
   assert.equal(state.refund.toBase58(), solAlice.publicKey.toBase58());
   assert.equal(state.netAmount, 100_000_000n);
-  assert.equal(state.feeBps, 100);
-  assert.equal(state.feeAmount, 1_000_000n);
-  assert.equal(state.feeCollector.toBase58(), solFeeAuthority.publicKey.toBase58());
+  assert.equal(state.platformFeeBps, 50);
+  assert.equal(state.platformFeeAmount, 500_000n);
+  assert.equal(state.platformFeeCollector.toBase58(), solFeeAuthority.publicKey.toBase58());
+  assert.equal(state.tradeFeeBps, 50);
+  assert.equal(state.tradeFeeAmount, 500_000n);
+  assert.equal(state.tradeFeeCollector.toBase58(), solTradeFeeAuthority.publicKey.toBase58());
 
   // Bob pays LN invoice and obtains preimage.
   const payRes = await clnCli('cln-bob', ['pay', bolt11]);
@@ -352,6 +378,7 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
     mint,
     paymentHashHex,
     preimageHex,
+    tradeFeeCollector: solTradeFeeAuthority.publicKey,
   });
   await sendAndConfirm(connection, claimTx);
 
@@ -359,6 +386,8 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   assert.equal(bobAcc.amount, 100_000_000n);
   const feeAcc = await getAccount(connection, feeCollectorToken, 'confirmed');
   assert.equal(feeAcc.amount, 0n);
+  const tradeFeeAcc = await getAccount(connection, tradeFeeCollectorToken, 'confirmed');
+  assert.equal(tradeFeeAcc.amount, 0n);
 
   // Fee collector can withdraw accrued fees at any time.
   const { tx: withdrawTx } = await withdrawFeesTx({
@@ -370,13 +399,25 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
   });
   await sendAndConfirm(connection, withdrawTx);
   const feeAcc2 = await getAccount(connection, feeCollectorToken, 'confirmed');
-  assert.equal(feeAcc2.amount, 1_000_000n);
+  assert.equal(feeAcc2.amount, 500_000n);
+
+  const { tx: withdrawTradeTx } = await withdrawTradeFeesTx({
+    connection,
+    feeCollector: solTradeFeeAuthority,
+    feeCollectorTokenAccount: tradeFeeCollectorToken,
+    mint,
+    amount: 0n,
+  });
+  await sendAndConfirm(connection, withdrawTradeTx);
+  const tradeFeeAcc2 = await getAccount(connection, tradeFeeCollectorToken, 'confirmed');
+  assert.equal(tradeFeeAcc2.amount, 500_000n);
 
   const afterState = await getEscrowState(connection, paymentHashHex);
   assert.ok(afterState, 'escrow state still exists');
   assert.equal(afterState.status, 1, 'escrow claimed');
   assert.equal(afterState.netAmount, 0n, 'escrow drained');
-  assert.equal(afterState.feeAmount, 0n, 'escrow drained');
+  assert.equal(afterState.platformFeeAmount, 0n, 'escrow drained');
+  assert.equal(afterState.tradeFeeAmount, 0n, 'escrow drained');
 
   await t.test('refund path: escrow refunds after timeout', async () => {
     const invoice2 = await clnCli('cln-alice', ['invoice', '100000msat', 'swap2', 'swap refund']);
@@ -395,6 +436,9 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       refund: solAlice.publicKey,
       refundAfterUnix: refundAfter2,
       amount: 1_000_000n,
+      expectedPlatformFeeBps: 50,
+      expectedTradeFeeBps: 50,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, escrowTx2);
 
@@ -462,6 +506,9 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       refund: solAlice.publicKey,
       refundAfterUnix: refundAfter4,
       amount: 1_000_000n,
+      expectedPlatformFeeBps: 50,
+      expectedTradeFeeBps: 50,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, escrowTx4);
 
@@ -529,6 +576,9 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       refund: solAlice.publicKey,
       refundAfterUnix: refundAfter3,
       amount: 1_000_000n,
+      expectedPlatformFeeBps: 50,
+      expectedTradeFeeBps: 50,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, escrowTx3);
 
@@ -544,6 +594,7 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       mint,
       paymentHashHex: paymentHash3,
       preimageHex: wrongPreimage,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
 
     let threw = false;
@@ -563,6 +614,7 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       mint,
       paymentHashHex: paymentHash3,
       preimageHex: realPreimage3,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, goodClaimTx);
     const after = (await getAccount(connection, bobToken, 'confirmed')).amount;
@@ -587,6 +639,9 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       refund: solAlice.publicKey,
       refundAfterUnix: refundAfterX,
       amount: 1_000_000n,
+      expectedPlatformFeeBps: 50,
+      expectedTradeFeeBps: 50,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, escrowTxX);
 
@@ -604,6 +659,7 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       mint,
       paymentHashHex: paymentHashX,
       preimageHex: preimageX,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
 
     let threw = false;
@@ -623,6 +679,7 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       mint,
       paymentHashHex: paymentHashX,
       preimageHex: preimageX,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, goodClaimTx);
     const after = (await getAccount(connection, bobToken, 'confirmed')).amount;
@@ -646,6 +703,9 @@ test('e2e: LN<->Solana escrow flows', async (t) => {
       refund: solAlice.publicKey,
       refundAfterUnix: refundAfter4,
       amount: 1_000_000n,
+      expectedPlatformFeeBps: 50,
+      expectedTradeFeeBps: 50,
+      tradeFeeCollector: solTradeFeeAuthority.publicKey,
     });
     await sendAndConfirm(connection, escrowTx4);
 
