@@ -142,40 +142,50 @@ class ScBridge extends Feature {
       this._sendError(client, 'Invalid message.');
       return;
     }
+    const reqId = Number.isInteger(message.id) ? message.id : null;
+    const reply = (payload) => {
+      if (reqId !== null) {
+        this._broadcastToClient(client, { id: reqId, ...payload });
+      } else {
+        this._broadcastToClient(client, payload);
+      }
+    };
+    const sendError = (error) => reply({ type: 'error', error });
+
     if (message.type === 'auth') {
       if (!this.token) {
-        this._sendError(client, 'Auth not enabled.');
+        sendError('Auth not enabled.');
         return;
       }
       if (message.token === this.token) {
         client.authed = true;
         client.ready = true;
-        this._broadcastToClient(client, { type: 'auth_ok' });
+        reply({ type: 'auth_ok' });
         return;
       }
-      this._sendError(client, 'Unauthorized.');
+      sendError('Unauthorized.');
       return;
     }
 
     if (this.requireAuth && !client.authed) {
-      this._sendError(client, 'Unauthorized.');
+      sendError('Unauthorized.');
       return;
     }
 
     switch (message.type) {
       case 'cli': {
         if (!this.cliEnabled) {
-          this._sendError(client, 'CLI over WS is disabled.');
+          sendError('CLI over WS is disabled.');
           return;
         }
         const command = typeof message.command === 'string' ? message.command.trim() : '';
         if (!command) {
-          this._sendError(client, 'Missing command.');
+          sendError('Missing command.');
           return;
         }
         this._enqueueCli(command)
           .then((result) => {
-            this._broadcastToClient(client, {
+            reply({
               type: 'cli_result',
               command,
               ok: result.ok,
@@ -185,7 +195,7 @@ class ScBridge extends Feature {
             });
           })
           .catch((err) => {
-            this._broadcastToClient(client, {
+            reply({
               type: 'cli_result',
               command,
               ok: false,
@@ -197,16 +207,16 @@ class ScBridge extends Feature {
         return;
       }
       case 'ping':
-        this._broadcastToClient(client, { type: 'pong', ts: Date.now() });
+        reply({ type: 'pong', ts: Date.now() });
         return;
       case 'set_filter': {
         client.filter = parseFilter(message.filter || '');
-        this._broadcastToClient(client, { type: 'filter_set', filter: message.filter || '' });
+        reply({ type: 'filter_set', filter: message.filter || '' });
         return;
       }
       case 'clear_filter': {
         client.filter = [];
-        this._broadcastToClient(client, { type: 'filter_set', filter: '' });
+        reply({ type: 'filter_set', filter: '' });
         return;
       }
       case 'subscribe': {
@@ -217,7 +227,7 @@ class ScBridge extends Feature {
             : [];
         if (!client.channels) client.channels = new Set();
         for (const ch of channels) client.channels.add(String(ch));
-        this._broadcastToClient(client, { type: 'subscribed', channels: Array.from(client.channels) });
+        reply({ type: 'subscribed', channels: Array.from(client.channels) });
         return;
       }
       case 'unsubscribe': {
@@ -228,28 +238,28 @@ class ScBridge extends Feature {
             : [];
         if (!client.channels) client.channels = new Set();
         for (const ch of channels) client.channels.delete(String(ch));
-        this._broadcastToClient(client, { type: 'subscribed', channels: Array.from(client.channels) });
+        reply({ type: 'subscribed', channels: Array.from(client.channels) });
         return;
       }
       case 'send': {
         if (!this.sidechannel) {
-          this._sendError(client, 'Sidechannel not ready.');
+          sendError('Sidechannel not ready.');
           return;
         }
         const channel = String(message.channel || '').trim();
         if (!channel) {
-          this._sendError(client, 'Missing channel.');
+          sendError('Missing channel.');
           return;
         }
         const payload = message.message;
         const invite = parseJsonOrBase64(message.invite);
         const welcome = parseJsonOrBase64(message.welcome);
         if (message.invite && !invite) {
-          this._sendError(client, 'Invalid invite (expected JSON or base64).');
+          sendError('Invalid invite (expected JSON or base64).');
           return;
         }
         if (message.welcome && !welcome) {
-          this._sendError(client, 'Invalid welcome (expected JSON or base64).');
+          sendError('Invalid welcome (expected JSON or base64).');
           return;
         }
         let invitePayload = invite;
@@ -265,30 +275,30 @@ class ScBridge extends Feature {
           invitePayload ? { invite: invitePayload } : undefined
         );
         if (!ok) {
-          this._sendError(client, 'Send denied (invite required or invalid).');
+          sendError('Send denied (invite required or invalid).');
           return;
         }
-        this._broadcastToClient(client, { type: 'sent', channel });
+        reply({ type: 'sent', channel });
         return;
       }
       case 'join': {
         if (!this.sidechannel) {
-          this._sendError(client, 'Sidechannel not ready.');
+          sendError('Sidechannel not ready.');
           return;
         }
         const channel = String(message.channel || '').trim();
         if (!channel) {
-          this._sendError(client, 'Missing channel.');
+          sendError('Missing channel.');
           return;
         }
         const invite = parseJsonOrBase64(message.invite);
         const welcome = parseJsonOrBase64(message.welcome);
         if (message.invite && !invite) {
-          this._sendError(client, 'Invalid invite (expected JSON or base64).');
+          sendError('Invalid invite (expected JSON or base64).');
           return;
         }
         if (message.welcome && !welcome) {
-          this._sendError(client, 'Invalid welcome (expected JSON or base64).');
+          sendError('Invalid welcome (expected JSON or base64).');
           return;
         }
         if (invite || welcome) {
@@ -298,63 +308,92 @@ class ScBridge extends Feature {
           .addChannel(channel)
           .then((ok) => {
             if (!ok) {
-              this._sendError(client, 'Join denied (invite required or invalid).');
+              sendError('Join denied (invite required or invalid).');
               return;
             }
-            this._broadcastToClient(client, { type: 'joined', channel });
+            reply({ type: 'joined', channel });
           })
-          .catch(() => {});
+          .catch((err) => {
+            sendError(err?.message ? `Join failed: ${err.message}` : 'Join failed.');
+          });
         return;
       }
-      case 'open': {
+      case 'leave': {
         if (!this.sidechannel) {
-          this._sendError(client, 'Sidechannel not ready.');
+          sendError('Sidechannel not ready.');
           return;
         }
         const channel = String(message.channel || '').trim();
         if (!channel) {
-          this._sendError(client, 'Missing channel.');
+          sendError('Missing channel.');
+          return;
+        }
+        this.sidechannel
+          .removeChannel(channel)
+          .then((ok) => {
+            // Leaving a non-joined channel is treated as a no-op.
+            if (client.channels) client.channels.delete(channel);
+            reply({ type: 'left', channel, ok });
+          })
+          .catch((err) => {
+            sendError(err?.message ? `Leave failed: ${err.message}` : 'Leave failed.');
+          });
+        return;
+      }
+      case 'open': {
+        if (!this.sidechannel) {
+          sendError('Sidechannel not ready.');
+          return;
+        }
+        const channel = String(message.channel || '').trim();
+        if (!channel) {
+          sendError('Missing channel.');
           return;
         }
         const via = message.via ? String(message.via) : null;
         const invite = parseJsonOrBase64(message.invite);
         const welcome = parseJsonOrBase64(message.welcome);
         if (message.invite && !invite) {
-          this._sendError(client, 'Invalid invite (expected JSON or base64).');
+          sendError('Invalid invite (expected JSON or base64).');
           return;
         }
         if (message.welcome && !welcome) {
-          this._sendError(client, 'Invalid welcome (expected JSON or base64).');
+          sendError('Invalid welcome (expected JSON or base64).');
           return;
         }
         const ok = this.sidechannel.requestOpen(channel, via, invite, welcome);
         if (!ok) {
-          this._sendError(client, 'Open request denied (invalid input or missing invite/welcome).');
+          sendError('Open request denied (invalid input or missing invite/welcome).');
           return;
         }
-        this._broadcastToClient(client, { type: 'open_requested', channel, via: via || null });
+        reply({ type: 'open_requested', channel, via: via || null });
         return;
       }
       case 'stats': {
         if (!this.sidechannel) {
-          this._sendError(client, 'Sidechannel not ready.');
+          sendError('Sidechannel not ready.');
           return;
         }
         const channels = Array.from(this.sidechannel.channels.keys());
         const connectionCount = this.sidechannel.connections.size;
-        this._broadcastToClient(client, { type: 'stats', channels, connectionCount });
+        reply({
+          type: 'stats',
+          channels,
+          connectionCount,
+          sidechannelStarted: this.sidechannel.started === true,
+        });
         return;
       }
       case 'info': {
         if (!this.info) {
-          this._sendError(client, 'Info not available.');
+          sendError('Info not available.');
           return;
         }
-        this._broadcastToClient(client, { type: 'info', info: this.info });
+        reply({ type: 'info', info: this.info });
         return;
       }
       default:
-        this._sendError(client, `Unknown type: ${message.type}`);
+        sendError(`Unknown type: ${message.type}`);
     }
   }
 
