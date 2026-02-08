@@ -75,6 +75,14 @@ const parseKeyValueList = (raw) => {
     .filter(Boolean);
 };
 
+const parseCsvList = (raw) => {
+  if (!raw) return null;
+  return String(raw)
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+};
+
 const parseWelcomeValue = (raw) => {
   if (!raw) return null;
   let text = String(raw || '').trim();
@@ -297,6 +305,21 @@ const scBridgeDebugRaw =
   '';
 const scBridgeDebug = parseBool(scBridgeDebugRaw, false);
 
+// Optional: override DHT bootstrap nodes (host:port list) for faster local tests.
+// Note: this affects all Hyperswarm joins (subnet replication + sidechannels).
+const peerDhtBootstrapRaw =
+  (flags['peer-dht-bootstrap'] && String(flags['peer-dht-bootstrap'])) ||
+  (flags['dht-bootstrap'] && String(flags['dht-bootstrap'])) ||
+  env.PEER_DHT_BOOTSTRAP ||
+  env.DHT_BOOTSTRAP ||
+  '';
+const peerDhtBootstrap = parseCsvList(peerDhtBootstrapRaw);
+const msbDhtBootstrapRaw =
+  (flags['msb-dht-bootstrap'] && String(flags['msb-dht-bootstrap'])) ||
+  env.MSB_DHT_BOOTSTRAP ||
+  '';
+const msbDhtBootstrap = parseCsvList(msbDhtBootstrapRaw);
+
 if (scBridgeEnabled && !scBridgeToken) {
   throw new Error('SC-Bridge requires --sc-bridge-token (auth is mandatory).');
 }
@@ -330,6 +353,7 @@ const msbConfig = createMsbConfig(MSB_ENV.MAINNET, {
   storeName: msbStoreName,
   storesDirectory: msbStoresDirectory,
   enableInteractiveMode: false,
+  dhtBootstrap: msbDhtBootstrap || undefined,
 });
 
 const msbBootstrapHex = b4a.toString(msbConfig.bootstrap, 'hex');
@@ -346,6 +370,7 @@ const peerConfig = createPeerConfig(PEER_ENV.MAINNET, {
   enableBackgroundTasks: true,
   enableUpdater: true,
   replicate: true,
+  dhtBootstrap: peerDhtBootstrap || undefined,
 });
 
 const ensureKeypairFile = async (keyPairPath) => {
@@ -398,6 +423,12 @@ console.log('MSB network bootstrap:', msbBootstrapHex);
 console.log('MSB channel:', msbChannel);
 console.log('MSB store:', msbStorePath);
 console.log('Peer store:', peerStorePath);
+if (Array.isArray(msbConfig?.dhtBootstrap) && msbConfig.dhtBootstrap.length > 0) {
+  console.log('MSB DHT bootstrap nodes:', msbConfig.dhtBootstrap.join(', '));
+}
+if (Array.isArray(peerConfig?.dhtBootstrap) && peerConfig.dhtBootstrap.length > 0) {
+  console.log('Peer DHT bootstrap nodes:', peerConfig.dhtBootstrap.join(', '));
+}
 console.log('Peer subnet bootstrap:', effectiveSubnetBootstrapHex);
 console.log('Peer subnet channel:', subnetChannel);
 console.log('Peer pubkey (hex):', peer.wallet.publicKey);
@@ -436,7 +467,9 @@ if (scBridgeEnabled) {
       msbBootstrap: msbBootstrapHex,
       msbChannel,
       msbStore: msbStorePath,
+      msbDhtBootstrap: Array.isArray(msbConfig?.dhtBootstrap) ? msbConfig.dhtBootstrap.slice() : null,
       peerStore: peerStorePath,
+      peerDhtBootstrap: Array.isArray(peerConfig?.dhtBootstrap) ? peerConfig.dhtBootstrap.slice() : null,
       subnetBootstrap: effectiveSubnetBootstrapHex,
       subnetChannel,
       peerPubkey: peer.wallet.publicKey,
