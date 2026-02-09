@@ -609,6 +609,10 @@ function App() {
             const msg = obj.message;
             const d = deriveKindTrade(msg);
             await appendScEvent({ ...obj, ...d }, { persist: true });
+          } else if (obj.type === 'error') {
+            const errMsg = String(obj?.error || 'sc/stream error');
+            setScStreamErr(errMsg);
+            await appendScEvent(obj, { persist: false });
           } else {
             await appendScEvent(obj, { persist: false });
           }
@@ -672,6 +676,10 @@ function App() {
           }
           if (obj.type === 'run_start' && obj.session_id) setSessionId(String(obj.session_id));
           if (obj.type === 'error') setRunErr(String(obj.error || 'error'));
+          if (obj.type === 'tool' && obj.result && typeof obj.result === 'object' && obj.result.type === 'error') {
+            const msg = String(obj?.result?.error || `${obj?.name || 'tool'} failed`);
+            setRunErr(msg);
+          }
           if (obj.type === 'done') setRunBusy(false);
           setConsoleEvents((prev) => {
             const next = prev.concat([obj]);
@@ -2213,14 +2221,15 @@ function ConsoleEventRow({ evt, onSelect }: { evt: any; onSelect: () => void }) 
   const tsRaw = evt?.ts ?? evt?.started_at ?? null;
   const ts = typeof tsRaw === 'number' ? new Date(tsRaw).toLocaleTimeString() : '';
   let summary = '';
-  if (type === 'tool') summary = `${evt?.name || ''}`;
+  const toolErr = type === 'tool' && evt?.result && typeof evt.result === 'object' && evt.result.type === 'error' ? String(evt.result.error || '') : '';
+  if (type === 'tool') summary = toolErr ? `${evt?.name || ''} -> ERROR: ${toolErr}` : `${evt?.name || ''}`;
   else if (type === 'final') summary = typeof evt?.content === 'string' ? evt.content : '';
   else if (type === 'error') summary = String(evt?.error || 'error');
   else if (type === 'run_start') summary = `session ${evt?.session_id || ''}`;
   else if (type === 'done') summary = `done (${evt?.session_id || ''})`;
 
   return (
-    <div className={`rowitem ${type === 'error' ? 'bad' : ''}`} onClick={onSelect} role="button">
+    <div className={`rowitem ${type === 'error' || toolErr ? 'bad' : ''}`} onClick={onSelect} role="button">
       <div className="rowitem-top">
         {ts ? <span className="mono dim">{ts}</span> : null}
         {type ? <span className="mono chip">{type}</span> : null}
