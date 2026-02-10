@@ -238,7 +238,11 @@ This repo includes **Collin**, a local-first control center UI (prompting is onl
 - Served by: `promptd` (same origin as `/v1/*`, avoids CORS issues)
 
 Important: Collin’s live sidechannel stream (`/v1/sc/stream`) requires a **running peer with SC-Bridge enabled**.
-Start a peer first (or start it from Collin via the `peer_*` tools once `promptd` is running).
+Start the stack from Collin (`START`) once `promptd` is running. Collin’s `START` runs `intercomswap_stack_start` which boots:
+- peer (SC-Bridge enabled)
+- receipts DB
+- Lightning (docker regtest bootstrap optional)
+- Solana (local validator bootstrap optional)
 
 Examples:
 ```bash
@@ -263,6 +267,17 @@ Run `promptd` and open the UI:
 
 Open:
 - `http://127.0.0.1:9333/`
+
+OS notes:
+- macOS/Linux:
+  - use `*.sh` wrappers (examples above)
+  - docker: Docker Desktop or Colima (any docker daemon is fine)
+  - Solana local: requires `solana-test-validator` in `PATH`
+- Windows:
+  - recommended: WSL2 (Ubuntu) + run the same `*.sh` commands inside WSL
+  - native PowerShell wrappers exist: `scripts\\*.ps1` (requires Pear + Node in Windows)
+  - docker: Docker Desktop (WSL backend recommended)
+  - Solana local: easiest in WSL2; otherwise use a remote `solana.rpc_url` (devnet/mainnet RPC) instead of `solana-test-validator`
 
 Dev mode (HMR) with a built-in proxy for `/v1` and `/healthz`:
 ```bash

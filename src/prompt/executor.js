@@ -1001,6 +1001,28 @@ export class ToolExecutor {
       // Ensure Lightning readiness (regtest docker can be fully bootstrapped automatically).
       let lnOut = null;
       let lnErr = null;
+      const appendErr = (prev, next) => {
+        const a = String(prev || '').trim();
+        const b = String(next || '').trim();
+        if (!a) return b || null;
+        if (!b) return a || null;
+        if (a.includes(b)) return a;
+        return `${a}; ${b}`;
+      };
+      const tryLnRegtestInit = async ({ originalError = null } = {}) => {
+        try {
+          lnOut = await this.execute('intercomswap_ln_regtest_init', {}, { autoApprove: true, dryRun: false, secrets });
+          lnErr = null;
+          return true;
+        } catch (err) {
+          const msg = err?.message ?? String(err);
+          const orig = originalError ? String(originalError).trim() : '';
+          lnErr = appendErr(lnErr, orig ? `precheck: ${orig}` : null);
+          lnErr = appendErr(lnErr, `ln_regtest_init: ${msg}`);
+          lnOut = { type: 'ln_regtest_init_failed', error: msg };
+          return false;
+        }
+      };
       try {
         const funds = await lnListFunds(this.ln);
         const channels = Array.isArray(funds?.channels) ? funds.channels : Array.isArray(funds?.channels?.channels) ? funds.channels.channels : [];
@@ -1009,16 +1031,15 @@ export class ToolExecutor {
           if (channelCount > 0) {
             lnOut = { type: 'ln_ready', channels: channelCount };
           } else {
-            lnOut = await this.execute('intercomswap_ln_regtest_init', {}, { autoApprove: true, dryRun: false, secrets });
+            await tryLnRegtestInit();
           }
         } else {
           lnOut = { type: 'ln_status', channels: channelCount };
         }
       } catch (err) {
-        lnErr = err?.message ?? String(err);
+        lnErr = appendErr(lnErr, err?.message ?? String(err));
         if (lnBootstrap && String(this.ln?.backend || '').trim() === 'docker' && String(this.ln?.network || '').trim().toLowerCase() === 'regtest') {
-          lnOut = await this.execute('intercomswap_ln_regtest_init', {}, { autoApprove: true, dryRun: false, secrets });
-          lnErr = null;
+          await tryLnRegtestInit({ originalError: err?.message ?? String(err) });
         }
       }
 
@@ -2570,6 +2591,16 @@ export class ToolExecutor {
         throw new Error(`${label} failed after ${tries} tries: ${lastErr?.message ?? String(lastErr)}`);
       };
 
+      const isRepairableLnStartupError = (msg) => {
+        const s = String(msg || '').toLowerCase();
+        // Most common "stuck forever" mode with the CLN docker image:
+        // - lightningd exits early (e.g. chain rewound / bad datadir)
+        // - the entrypoint keeps waiting for an inotify event on lightning-rpc, but the socket file
+        //   already exists in the persisted volume, so the event never fires and the container looks "Up".
+        // In these cases, wiping regtest volumes is the fastest, most reliable recovery.
+        return s.includes('lightning-rpc') && (s.includes('connection refused') || s.includes('refused'));
+      };
+
       const parseJsonOrText = (text) => {
         const s = String(text || '').trim();
         if (!s) return { result: '' };
@@ -2624,32 +2655,51 @@ export class ToolExecutor {
         };
       }
 
-      await dockerCompose({
-        composeFile,
-        args: ['up', '-d', '--remove-orphans', 'bitcoind', fromService, toService],
-        cwd: process.cwd(),
-      });
-
-      await retry(() => btcCli(['getblockchaininfo']), { label: 'bitcoind ready', tries: 120, delayMs: 500 });
-
       const baseLnCfg = { ...this.ln, backend: 'docker', network: 'regtest', impl, composeFile, cwd: process.cwd() };
       const fromCfg = { ...baseLnCfg, service: fromService };
       const toCfg = { ...baseLnCfg, service: toService };
 
-      await retry(() => lnGetInfo(fromCfg), { label: `${fromService} ready`, tries: 120, delayMs: 500 });
-      await retry(() => lnGetInfo(toCfg), { label: `${toService} ready`, tries: 120, delayMs: 500 });
+      const composeUp = async () => {
+        await dockerCompose({
+          composeFile,
+          args: ['up', '-d', '--remove-orphans', 'bitcoind', fromService, toService],
+          cwd: process.cwd(),
+        });
+        await retry(() => btcCli(['getblockchaininfo']), { label: 'bitcoind ready', tries: 120, delayMs: 500 });
+      };
 
-      if (impl === 'lnd') {
-        await retry(async () => {
-          const info = await lnGetInfo(fromCfg);
-          if (!info?.synced_to_chain) throw new Error('from node not synced_to_chain');
-          return info;
-        }, { label: `${fromService} synced`, tries: 200, delayMs: 250 });
-        await retry(async () => {
-          const info = await lnGetInfo(toCfg);
-          if (!info?.synced_to_chain) throw new Error('to node not synced_to_chain');
-          return info;
-        }, { label: `${toService} synced`, tries: 200, delayMs: 250 });
+      const waitLnReady = async ({ tries = 120 } = {}) => {
+        await retry(() => lnGetInfo(fromCfg), { label: `${fromService} ready`, tries, delayMs: 500 });
+        await retry(() => lnGetInfo(toCfg), { label: `${toService} ready`, tries, delayMs: 500 });
+
+        if (impl === 'lnd') {
+          await retry(async () => {
+            const info = await lnGetInfo(fromCfg);
+            if (!info?.synced_to_chain) throw new Error('from node not synced_to_chain');
+            return info;
+          }, { label: `${fromService} synced`, tries: 200, delayMs: 250 });
+          await retry(async () => {
+            const info = await lnGetInfo(toCfg);
+            if (!info?.synced_to_chain) throw new Error('to node not synced_to_chain');
+            return info;
+          }, { label: `${toService} synced`, tries: 200, delayMs: 250 });
+        }
+      };
+
+      // First bring-up attempt.
+      await composeUp();
+
+      // Fast readiness probe. If it hits a known "stuck forever" mode, wipe regtest volumes once and retry.
+      try {
+        await waitLnReady({ tries: 30 });
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        if (!isRepairableLnStartupError(msg)) throw err;
+
+        // Repair: wipe regtest volumes (safe for regtest) and restart.
+        await dockerCompose({ composeFile, args: ['down', '--volumes'], cwd: process.cwd() });
+        await composeUp();
+        await waitLnReady({ tries: 120 });
       }
 
       // Miner wallet + spendable coins.
