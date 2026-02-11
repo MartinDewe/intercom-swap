@@ -791,6 +791,7 @@ Current Collin wallet/trading guardrails:
 - Trade automation now runs server-side (backend worker via `intercomswap_tradeauto_*`), not in browser state. Collin no longer owns client-side settlement loops.
 - Collin sidechannel stream processing deduplicates repeated SC events (including reconnect backlog duplicates) before inserting into the local event store to keep browser CPU/load bounded.
   - dedupe uses signed envelope identity first (not seq-first), so re-sent identical envelopes with fresh seq values are dropped.
+  - UI stream rendering is batched (instead of per-event re-render) and dedupe-map pruning runs periodically (instead of per-event full scans) to prevent browser lockups during high-volume replay windows.
 - Collin keeps invite-only `swap:*` trade channels separate from rendezvous settings:
   - trade channels can be auto-watched for stream visibility after join/invite,
   - but they are never promoted into the global rendezvous channel configuration used for stack start or Offer/RFQ broadcast.

@@ -330,6 +330,7 @@ Start the stack from Collin (`START`) once `promptd` is running. Collin’s `STA
 - receipts DB
 - Lightning (docker regtest bootstrap optional)
 - Solana (local validator bootstrap optional)
+- Stream safety: Collin batches SC event UI updates and prunes dedupe caches periodically (not per-event), so replay bursts during RFQ/offer automation do not peg browser CPU.
 
 Examples:
 ```bash

@@ -344,7 +344,14 @@ function App() {
   const scEventsMax = 3000;
   const scEventDedupTtlMs = 20 * 60 * 1000;
   const scEventDedupMax = 20_000;
+  const scEventDedupPruneEveryMs = 5000;
+  const scEventDedupOverflowFactor = 1.2;
+  const scEventUiFlushMs = 120;
+  const scEventUiFlushBatch = 240;
   const scEventDedupRef = useRef<Map<string, number>>(new Map());
+  const scEventDedupNextPruneAtRef = useRef<number>(0);
+  const scPendingUiEventsRef = useRef<any[]>([]);
+  const scUiFlushTimerRef = useRef<number | null>(null);
   const promptEventsMax = 3000;
   const promptChatMax = 1200;
 
@@ -3352,7 +3359,66 @@ function App() {
     if (follow) requestAnimationFrame(scrollChatToBottom);
   }
 
-  async function appendScEvent(evt: any, { persist = true } = {}) {
+  function maybePruneScEventDedupMap(now: number) {
+    const map = scEventDedupRef.current;
+    const sizeLimit = Math.max(scEventDedupMax, Math.trunc(scEventDedupMax * scEventDedupOverflowFactor));
+    const dueByTime = now >= Number(scEventDedupNextPruneAtRef.current || 0);
+    const dueBySize = map.size > sizeLimit;
+    if (!dueByTime && !dueBySize) return;
+
+    for (const [k, seenAt] of map.entries()) {
+      if (!k || !Number.isFinite(seenAt) || now - Number(seenAt) > scEventDedupTtlMs) map.delete(k);
+    }
+    if (map.size > scEventDedupMax) {
+      const ordered = Array.from(map.entries()).sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+      const drop = map.size - scEventDedupMax;
+      for (let i = 0; i < drop; i += 1) {
+        const key = String(ordered[i]?.[0] || '');
+        if (key) map.delete(key);
+      }
+    }
+    scEventDedupNextPruneAtRef.current = now + scEventDedupPruneEveryMs;
+  }
+
+  function flushPendingScUiEvents() {
+    scUiFlushTimerRef.current = null;
+    const pending = scPendingUiEventsRef.current;
+    if (!Array.isArray(pending) || pending.length < 1) return;
+    const takeCount = Math.min(pending.length, scEventUiFlushBatch);
+    const batch = pending.splice(0, takeCount);
+    if (batch.length < 1) return;
+
+    const newestFirst = [...batch].reverse();
+    const el = scListRef.current;
+    const prevHeight = el ? el.scrollHeight : 0;
+    const prevTop = el ? el.scrollTop : 0;
+    const keepViewport = Boolean(el && prevTop > 80);
+
+    setScEvents((prev) => {
+      const next = newestFirst.concat(prev);
+      if (next.length <= scEventsMax) return next;
+      return next.slice(0, scEventsMax);
+    });
+    if (keepViewport) {
+      requestAnimationFrame(() => {
+        const el2 = scListRef.current;
+        if (!el2) return;
+        const delta = el2.scrollHeight - prevHeight;
+        if (delta > 0) el2.scrollTop = prevTop + delta;
+      });
+    }
+
+    if (scPendingUiEventsRef.current.length > 0 && scUiFlushTimerRef.current === null) {
+      scUiFlushTimerRef.current = window.setTimeout(flushPendingScUiEvents, scEventUiFlushMs);
+    }
+  }
+
+  function scheduleScUiFlush() {
+    if (scUiFlushTimerRef.current !== null) return;
+    scUiFlushTimerRef.current = window.setTimeout(flushPendingScUiEvents, scEventUiFlushMs);
+  }
+
+  function appendScEvent(evt: any, { persist = true } = {}) {
     const e = evt && typeof evt === 'object' ? evt : { type: 'event', evt };
     const msgTs = e?.message && typeof e.message.ts === 'number' ? e.message.ts : null;
     const ts = typeof e.ts === 'number' ? e.ts : msgTs !== null ? msgTs : Date.now();
@@ -3364,44 +3430,18 @@ function App() {
       const prevSeenAt = Number(map.get(dedupKey) || 0);
       if (prevSeenAt > 0 && now - prevSeenAt <= scEventDedupTtlMs) return;
       map.set(dedupKey, now);
-
-      for (const [k, seenAt] of Array.from(map.entries())) {
-        if (!k || !Number.isFinite(seenAt) || now - Number(seenAt) > scEventDedupTtlMs) map.delete(k);
-      }
-      if (map.size > scEventDedupMax) {
-        const ordered = Array.from(map.entries()).sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
-        const drop = map.size - scEventDedupMax;
-        for (let i = 0; i < drop; i += 1) map.delete(String(ordered[i]?.[0] || ''));
-      }
+      maybePruneScEventDedupMap(now);
     }
-    const channel = String(e.channel || '');
-    const kind = String(e.kind || '');
-    const trade_id = String(e.trade_id || '');
-    const seq = typeof e.seq === 'number' ? e.seq : null;
-    let dbId: number | null = null;
+
+    scPendingUiEventsRef.current.push(normalized);
+    scheduleScUiFlush();
+
     if (persist && normalized.type === 'sc_event') {
-      try {
-        dbId = await scAdd({ ts, channel, kind, trade_id, seq, evt: normalized });
-      } catch (_e) {}
-    }
-
-    const el = scListRef.current;
-    const prevHeight = el ? el.scrollHeight : 0;
-    const prevTop = el ? el.scrollTop : 0;
-    const keepViewport = Boolean(el && prevTop > 80);
-
-    setScEvents((prev) => {
-      const next = [{ ...normalized, db_id: dbId }].concat(prev);
-      if (next.length <= scEventsMax) return next;
-      return next.slice(0, scEventsMax);
-    });
-    if (keepViewport) {
-      requestAnimationFrame(() => {
-        const el2 = scListRef.current;
-        if (!el2) return;
-        const delta = el2.scrollHeight - prevHeight;
-        if (delta > 0) el2.scrollTop = prevTop + delta;
-      });
+      const channel = String(e.channel || '');
+      const kind = String(e.kind || '');
+      const trade_id = String(e.trade_id || '');
+      const seq = typeof e.seq === 'number' ? e.seq : null;
+      void scAdd({ ts, channel, kind, trade_id, seq, evt: normalized }).catch(() => {});
     }
   }
 
@@ -3491,7 +3531,7 @@ function App() {
 	            try {
 	              obj = JSON.parse(line);
 	            } catch (_e) {
-	              await appendScEvent({ type: 'parse_error', ts: Date.now(), line }, { persist: false });
+	              appendScEvent({ type: 'parse_error', ts: Date.now(), line }, { persist: false });
 	              continue;
 	            }
 
@@ -3511,7 +3551,7 @@ function App() {
 	            if (obj.type === 'sc_event') {
 	              const msg = obj.message;
 	              const d = deriveKindTrade(msg);
-	              await appendScEvent({ ...obj, ...d }, { persist: true });
+	              appendScEvent({ ...obj, ...d }, { persist: true });
 	              continue;
 	            }
 
@@ -3520,7 +3560,7 @@ function App() {
 	              throw new Error(String(obj?.error || 'sc/stream error'));
 	            }
 
-	            await appendScEvent(obj, { persist: false });
+	            appendScEvent(obj, { persist: false });
 	          }
 	        }
 		      } catch (err: any) {
@@ -3535,7 +3575,7 @@ function App() {
 		          setScStreamErr(transient ? null : msg);
 		        }
 		        if (!transient) {
-		          await appendScEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
+		          appendScEvent({ type: 'error', ts: Date.now(), error: msg }, { persist: false });
 		        }
 		      }
 
@@ -3564,6 +3604,11 @@ function App() {
 		    scStreamWantedRef.current = false;
 		    if (scAbortRef.current) scAbortRef.current.abort();
 		    scAbortRef.current = null;
+        if (scUiFlushTimerRef.current !== null) {
+          clearTimeout(scUiFlushTimerRef.current);
+          scUiFlushTimerRef.current = null;
+        }
+        scPendingUiEventsRef.current = [];
 		    setScConnecting(false);
 		    setScConnected(false);
 		    setScStreamErr(null);
@@ -3859,6 +3904,12 @@ function App() {
     // Reset in-memory logs when switching env kinds so operators don't get "mixed" UI.
     setScEvents([]);
     scEventDedupRef.current.clear();
+    scEventDedupNextPruneAtRef.current = 0;
+    scPendingUiEventsRef.current = [];
+    if (scUiFlushTimerRef.current !== null) {
+      clearTimeout(scUiFlushTimerRef.current);
+      scUiFlushTimerRef.current = null;
+    }
     setScSwapWatchChannelsState([]);
     setPromptEvents([]);
     setPromptChat([]);
@@ -3889,6 +3940,16 @@ function App() {
       } catch (_e) {}
     })();
   }, [envInfo?.env_kind]);
+
+  useEffect(() => {
+    return () => {
+      if (scUiFlushTimerRef.current !== null) {
+        clearTimeout(scUiFlushTimerRef.current);
+        scUiFlushTimerRef.current = null;
+      }
+      scPendingUiEventsRef.current = [];
+    };
+  }, []);
 
   // No “follow tail” UI: logs render newest-first.
 
