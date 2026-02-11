@@ -1436,6 +1436,57 @@ function App() {
     return cj && typeof cj === 'object' ? cj : null;
   }
 
+  async function quoteFromRfqEnvelope(rfqEvt: any, opts: { origin: 'manual' }) {
+    const channel = String((rfqEvt as any)?.channel || '').trim();
+    const msg = rfqEvt?.message;
+    if (!channel || !msg || typeof msg !== 'object') throw new Error('rfq event missing channel/message');
+    const body = msg?.body && typeof msg.body === 'object' ? msg.body : {};
+    const tradeFeeCollector = String(solSignerPubkey || '').trim();
+    if (!tradeFeeCollector) {
+      throw new Error('Solana signer pubkey unavailable (cannot set trade_fee_collector)');
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const quoteTtlSec = 180;
+    const rfqValidUntilRaw = Number.parseInt(String((body as any)?.valid_until_unix ?? ''), 10);
+    const rfqValidUntil = Number.isFinite(rfqValidUntilRaw) && rfqValidUntilRaw > 0 ? rfqValidUntilRaw : null;
+    const candidateUntil = nowSec + quoteTtlSec;
+    const validUntilUnix =
+      rfqValidUntil && rfqValidUntil > nowSec + 5
+        ? Math.max(nowSec + 10, Math.min(candidateUntil, rfqValidUntil))
+        : candidateUntil;
+
+    const minWinRaw = Number.parseInt(String((body as any)?.min_sol_refund_window_sec ?? ''), 10);
+    const maxWinRaw = Number.parseInt(String((body as any)?.max_sol_refund_window_sec ?? ''), 10);
+    const minWin = Number.isFinite(minWinRaw) ? minWinRaw : null;
+    const maxWin = Number.isFinite(maxWinRaw) ? maxWinRaw : null;
+    let refundWindowSec = 72 * 3600;
+    if (typeof minWin === 'number') refundWindowSec = Math.max(refundWindowSec, minWin);
+    if (typeof maxWin === 'number') refundWindowSec = Math.min(refundWindowSec, maxWin);
+    refundWindowSec = Math.max(3600, Math.min(7 * 24 * 3600, Math.trunc(refundWindowSec)));
+
+    if (opts.origin === 'manual' && toolRequiresApproval('intercomswap_quote_post_from_rfq') && !autoApprove) {
+      const ok = window.confirm(`Post quote for this RFQ now?\n\nchannel: ${channel}`);
+      if (!ok) return null;
+    }
+    const out = await runToolFinal(
+      'intercomswap_quote_post_from_rfq',
+      {
+        channel,
+        rfq_envelope: msg,
+        trade_fee_collector: tradeFeeCollector,
+        sol_refund_window_sec: refundWindowSec,
+        valid_until_unix: validUntilUnix,
+      },
+      { auto_approve: true }
+    );
+    const cj = out?.content_json;
+    if (cj && typeof cj === 'object' && String((cj as any).type || '') === 'error') {
+      throw new Error(String((cj as any).error || 'quote_post_from_rfq failed'));
+    }
+    return cj && typeof cj === 'object' ? cj : null;
+  }
+
   function feedEventId(prefix: string, e: any, fallbackIndex?: number) {
     const db = typeof e?.db_id === 'number' ? e.db_id : null;
     if (db !== null) return `${prefix}db:${db}`;
@@ -5260,11 +5311,21 @@ function App() {
 	                      evt={it.evt}
 	                      oracle={oracle}
 	                      badge={it.badge || ''}
-	                      showQuote={false}
+	                      showQuote={!it.badge}
 	                      onSelect={() => setSelected({ type: it.badge ? 'rfq_posted' : 'rfq', evt: it.evt })}
-	                      onQuote={() => {}}
+	                      onQuote={() => {
+	                        void (async () => {
+	                          try {
+	                            const out = await quoteFromRfqEnvelope(it.evt, { origin: 'manual' });
+	                            const quoteId = String((out as any)?.quote_id || '').trim();
+	                            pushToast('success', `Quote posted${quoteId ? ` (${quoteId.slice(0, 12)}…)` : ''}`);
+	                          } catch (e: any) {
+	                            pushToast('error', e?.message || String(e));
+	                          }
+	                        })();
+	                      }}
 	                    />
-                  )
+	                  )
                 }
               />
             </Panel>
