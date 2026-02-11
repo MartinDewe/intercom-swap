@@ -1028,6 +1028,17 @@ export class ToolExecutor {
         peerStore = String(aliveMatch?.store || '').trim();
         peerOut = { type: 'peer_already_running', name: peerName, store: peerStore, pid: aliveMatch.pid || null, log: aliveMatch.log || null };
       } else {
+        // Heuristic defaults:
+        // 1) Prefer store inferred from the configured peer.keypair path (if it points into stores/<store>/db/keypair.json).
+        if (!peerStore) {
+          try {
+            const kp = String(this.peer?.keypairPath || '').trim();
+            const m = kp.match(/[\\/]+stores[\\/]+([^\\/]+)[\\/]+db[\\/]+keypair\\.json$/i);
+            const inferred = m ? String(m[1] || '').trim() : '';
+            if (inferred && /^[A-Za-z0-9._-]+$/.test(inferred)) peerStore = inferred;
+          } catch (_e) {}
+        }
+
         // Heuristic defaults: derive store from receipts db basename if possible.
         if (!peerStore) {
           try {
