@@ -197,6 +197,10 @@ This repo also provides long-running RFQ “agent bots” that sit in an RFQ cha
     - Inbound bootstrap options:
       1) have a counterparty open a channel to this node, or
       2) rebalance by paying an invoice from this node to another controlled node.
+  - Ongoing trading reality (important for profitability):
+    - Liquidity is directional and finite per channel set. One-sided flow eventually blocks one side of quoting.
+    - Roughly: if you sold ~X sats BTC (paid out) on a channel set, you can receive about that much back before you must rebalance again (fees/routing reduce the exact number).
+    - For market-making, run both sides (sell BTC + sell USDT), price in routing/rebalance costs, and rebalance when flow becomes one-sided.
   - Channels are not opened per trade. Open channels ahead of time (or rely on routing if you have a well-connected node).
   - See: "Live Ops Checklist" -> "Lightning liquidity prerequisites".
 - Solana RPC + keypair paths stored under `onchain/` + the SPL mint (`USDT` on mainnet).
@@ -457,6 +461,10 @@ A→Z operating flow:
      1) On helper node B: create invoice with `intercomswap_ln_invoice_create`.
      2) On trading node A: pay it with `intercomswap_ln_pay`.
      3) Re-check with `intercomswap_ln_listchannels` until remote/inbound on A is sufficient for intended Sell USDT lines.
+   - Quoting policy for OpenClaw:
+     - Before posting each line, verify direction-specific liquidity (`intercomswap_ln_listchannels`) for that side.
+     - If liquidity is insufficient, do not post that line; rebalance first or switch to the opposite side.
+     - Treat rebalance/routing costs as part of spread; otherwise profitable trading degrades into churn.
    - Add/remove liquidity:
      - If backend supports splicing: `intercomswap_ln_splice`.
      - If not: open additional channels and/or close/reopen (`intercomswap_ln_closechannel`).
