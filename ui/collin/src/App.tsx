@@ -1370,6 +1370,14 @@ function App() {
   const autoSwapStageRetryRef = useRef<Map<string, number>>(new Map());
   const autoSwapPreimageByTradeRef = useRef<Map<string, string>>(new Map());
   const autoAcceptLockedWarnedRef = useRef(false);
+  const AUTO_EVENT_SCAN_LIMIT = 200;
+  const AUTO_SWAP_SCAN_LIMIT = 32;
+  const AUTO_EVENT_MAX_AGE_MS = 10 * 60 * 1000; // Ignore stale automation backlog beyond 10 minutes.
+  const isEventStaleForAuto = (evt: any, maxAgeMs = AUTO_EVENT_MAX_AGE_MS) => {
+    const ts = typeof evt?.ts === 'number' ? evt.ts : 0;
+    if (!Number.isFinite(ts) || ts <= 0) return false;
+    return Date.now() - ts > maxAgeMs;
+  };
 
   function canRunAutoSwapStage(stageKey: string) {
     if (!stageKey) return false;
@@ -1699,10 +1707,14 @@ function App() {
     if (!tradeFeeCollector) return;
     let cancelled = false;
     void (async () => {
+      let actions = 0;
+      const maxActions = 5;
       // Oldest first keeps sequence stable when multiple RFQs are waiting.
-      const queue = [...rfqEvents].reverse();
+      const queue = [...rfqEvents.slice(-AUTO_EVENT_SCAN_LIMIT)].reverse();
       for (const rfqEvt of queue) {
         if (cancelled) return;
+        if (actions >= maxActions) return;
+        if (isEventStaleForAuto(rfqEvt)) continue;
         const sig = String((rfqEvt as any)?.message?.sig || '').trim().toLowerCase();
         if (!sig || autoQuotedRfqSigRef.current.has(sig)) continue;
         const match = matchOfferForRfq(rfqEvt);
@@ -1732,6 +1744,7 @@ function App() {
           }
           const quoteId = String((cj as any)?.quote_id || '').trim();
           pushToast('success', `Auto-quoted RFQ${quoteId ? ` (${quoteId.slice(0, 12)}…)` : ''}`);
+          actions += 1;
         } catch (err: any) {
           pushToast('error', `Auto-quote failed: ${err?.message || String(err)}`);
         }
@@ -1759,12 +1772,17 @@ function App() {
     }
     let cancelled = false;
     void (async () => {
-      const queue = [...quoteEvents].reverse();
+      let actions = 0;
+      const maxActions = 5;
+      const queue = [...quoteEvents.slice(-AUTO_EVENT_SCAN_LIMIT)].reverse();
       for (const quoteEvt of queue) {
         if (cancelled) return;
+        if (actions >= maxActions) return;
+        if (isEventStaleForAuto(quoteEvt)) continue;
         const sig = String((quoteEvt as any)?.message?.sig || '').trim().toLowerCase();
         if (!sig || autoAcceptedQuoteSigRef.current.has(sig)) continue;
         const tradeId = String((quoteEvt as any)?.trade_id || (quoteEvt as any)?.message?.trade_id || '').trim();
+        if (tradeId && !myRfqTradeIds.has(tradeId)) continue;
         if (tradeId && autoAcceptedTradeIdRef.current.has(tradeId) && !terminalTradeIdsSet.has(tradeId)) {
           continue;
         }
@@ -1774,6 +1792,7 @@ function App() {
           if (tradeId) autoAcceptedTradeIdRef.current.add(tradeId);
           const quoteId = String((out as any)?.quote_id || '').trim();
           pushToast('success', `Auto-accepted quote${quoteId ? ` (${quoteId.slice(0, 12)}…)` : ''}`);
+          actions += 1;
         } catch (err: any) {
           pushToast('error', `Auto-accept failed: ${err?.message || String(err)}`);
         }
@@ -1783,18 +1802,22 @@ function App() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [health?.ok, autoAcceptQuotes, quoteEvents, lnLiquidityMode, lnWalletLocked, terminalTradeIdsSet]);
+  }, [health?.ok, autoAcceptQuotes, quoteEvents, lnLiquidityMode, lnWalletLocked, terminalTradeIdsSet, myRfqTradeIds]);
 
   useEffect(() => {
     if (!health?.ok || !autoInviteFromAccepts) return;
     let cancelled = false;
     void (async () => {
-      const accepts = [...scEvents].reverse();
+      let actions = 0;
+      const maxActions = 5;
+      const accepts = [...scEvents.slice(-AUTO_EVENT_SCAN_LIMIT)].reverse();
       for (const e of accepts) {
         if (cancelled) return;
+        if (actions >= maxActions) return;
         try {
           const kind = String((e as any)?.kind || '').trim();
           if (kind !== 'swap.quote_accept') continue;
+          if (isEventStaleForAuto(e)) continue;
           const msg = (e as any)?.message;
           const sig = String(msg?.sig || '').trim().toLowerCase();
           if (!sig || autoInvitedAcceptSigRef.current.has(sig)) continue;
@@ -1822,6 +1845,7 @@ function App() {
           }
           const swapChannel = String((cj as any)?.swap_channel || '').trim();
           pushToast('success', `Auto-invite sent${swapChannel ? ` (${swapChannel})` : ''}`);
+          actions += 1;
         } catch (err: any) {
           pushToast('error', `Auto-invite failed: ${err?.message || String(err)}`);
         }
@@ -1837,10 +1861,14 @@ function App() {
     if (!health?.ok || !autoJoinSwapInvites) return;
     let cancelled = false;
     void (async () => {
-      const queue = [...inviteEvents].reverse();
+      let actions = 0;
+      const maxActions = 5;
+      const queue = [...inviteEvents.slice(-AUTO_EVENT_SCAN_LIMIT)].reverse();
       for (const e of queue) {
         if (cancelled) return;
+        if (actions >= maxActions) return;
         try {
+          if (isEventStaleForAuto(e)) continue;
           const msg = (e as any)?.message;
           const sig = String(msg?.sig || '').trim().toLowerCase();
           if (!sig || autoJoinedInviteSigRef.current.has(sig)) continue;
@@ -1873,6 +1901,7 @@ function App() {
           if (tradeId) dismissInviteTrade(tradeId);
           pushToast('success', `Auto-joined swap invite${swapCh ? ` (${swapCh})` : ''}`);
           void refreshPreflight();
+          actions += 1;
         } catch (err: any) {
           pushToast('error', `Auto-join failed: ${err?.message || String(err)}`);
         }
@@ -1929,9 +1958,12 @@ function App() {
 
     let cancelled = false;
     void (async () => {
-      const queue = [...swapTradeContexts].reverse();
+      let actions = 0;
+      const maxActions = 6;
+      const queue = swapTradeContexts.slice(0, AUTO_SWAP_SCAN_LIMIT);
       for (const tradeCtx of queue) {
         if (cancelled) return;
+        if (actions >= maxActions) return;
         try {
           const tradeId = String(tradeCtx?.trade_id || '').trim();
           if (!tradeId) continue;
@@ -2024,6 +2056,7 @@ function App() {
                 );
                 markAutoSwapStageSuccess(stageKey);
                 pushToast('success', `Auto terms posted (${tradeId.slice(0, 10)}…)`);
+                actions += 1;
               } catch (err: any) {
                 markAutoSwapStageRetry(stageKey, 10_000);
               }
@@ -2046,6 +2079,7 @@ function App() {
                 );
                 markAutoSwapStageSuccess(stageKey);
                 pushToast('success', `Auto terms-accept posted (${tradeId.slice(0, 10)}…)`);
+                actions += 1;
               } catch (err: any) {
                 markAutoSwapStageRetry(stageKey, 10_000);
               }
@@ -2077,6 +2111,7 @@ function App() {
                 );
                 markAutoSwapStageSuccess(stageKey);
                 pushToast('success', `Auto LN invoice posted (${tradeId.slice(0, 10)}…)`);
+                actions += 1;
               } catch (err: any) {
                 markAutoSwapStageRetry(stageKey, 10_000);
               }
@@ -2125,6 +2160,7 @@ function App() {
                 );
                 markAutoSwapStageSuccess(stageKey);
                 pushToast('success', `Auto escrow posted (${tradeId.slice(0, 10)}…)`);
+                actions += 1;
               } catch (err: any) {
                 markAutoSwapStageRetry(stageKey, 10_000);
               }
@@ -2157,6 +2193,7 @@ function App() {
                 }
                 markAutoSwapStageSuccess(stageKey);
                 pushToast('success', `Auto LN pay posted (${tradeId.slice(0, 10)}…)`);
+                actions += 1;
               } catch (err: any) {
                 markAutoSwapStageRetry(stageKey, 10_000);
               }
@@ -2198,6 +2235,7 @@ function App() {
                 );
                 markAutoSwapStageSuccess(stageKey);
                 pushToast('success', `Auto claim posted (${tradeId.slice(0, 10)}…)`);
+                actions += 1;
               } catch (err: any) {
                 markAutoSwapStageRetry(stageKey, 15_000);
               }
