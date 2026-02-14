@@ -129,6 +129,15 @@ export function repairToolArguments(toolName, args) {
     if ('ttl_sec' in out) out.ttl_sec = coerceSafeInt(out.ttl_sec);
     if ('valid_until_unix' in out) out.valid_until_unix = coerceSafeInt(out.valid_until_unix);
 
+    // Common mistake: models use "arguments" instead of "args" for the nested sub-tool arguments.
+    renameKey(out, 'arguments', 'args');
+    if (typeof out.args === 'string') {
+      try {
+        const parsed = JSON.parse(out.args);
+        if (isObject(parsed)) out.args = parsed;
+      } catch (_e) {}
+    }
+
     // Prompt-mode robustness: the LLM often invents deterministic, term-derived job names
     // (e.g. offer_1000sats_0.12usdt) which collide on repeated prompts and are hostile to
     // "chunking". If we detect such a name (or it is missing/invalid), generate a Collin-style

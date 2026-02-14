@@ -160,3 +160,16 @@ test('repairToolArguments: autopost_start rewrites amount-derived job names to C
   assert.ok(!out.name.includes('sats'), out.name);
   assert.ok(!out.name.includes('usdt'), out.name);
 });
+
+test('repairToolArguments: autopost_start renames arguments -> args (nested sub-tool args)', () => {
+  const out = repairToolArguments('intercomswap_autopost_start', {
+    name: 'rfq_job',
+    tool: 'intercomswap_rfq_post',
+    interval_sec: 10,
+    ttl_sec: 60,
+    arguments: { channel: 'c', trade_id: 'rfq-1', btc_sats: 1002, usdt_amount: '0.33' },
+  });
+  assert.ok(!('arguments' in out));
+  assert.ok(out.args && typeof out.args === 'object');
+  assert.equal(out.args.btc_sats, 1002);
+});

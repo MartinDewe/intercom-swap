@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import { buildIntercomswapSystemPrompt } from './system.js';
 import { INTERCOMSWAP_TOOLS } from './tools.js';
@@ -11,6 +11,98 @@ import { stableStringify } from '../util/stableStringify.js';
 
 function nowMs() {
   return Date.now();
+}
+
+function parseEveryIntervalSec(prompt) {
+  const p = String(prompt || '');
+  const m = p.match(
+    /\bevery\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)\b/i
+  );
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) return null;
+  const unit = String(m[2] || '').toLowerCase();
+  if (!unit) return n;
+  if (unit.startsWith('s')) return n;
+  if (unit.startsWith('m')) return n * 60;
+  if (unit.startsWith('h')) return n * 3600;
+  return null;
+}
+
+function parseSatsForUsdt(prompt) {
+  const p = String(prompt || '');
+  // Only handle narrow, explicit phrases. If this doesn't match, we fall back to the LLM.
+  // Examples:
+  // - "sell 1002 sats for 0.33 usdt"
+  // - "buy 1002 sats for 0.33 usdt"
+  const mSats = p.match(/\b(sell|buy)\s+(\d+)\s*(sat|sats)\b/i);
+  const mUsdt = p.match(/\bfor\s+([0-9]+(?:\.[0-9]+)?)\s*usdt\b/i);
+  if (!mSats || !mUsdt) return null;
+  const verb = String(mSats[1] || '').toLowerCase();
+  const sats = Number.parseInt(String(mSats[2] || ''), 10);
+  const usdt = String(mUsdt[1] || '').trim();
+  if (!Number.isFinite(sats) || !Number.isInteger(sats) || sats < 1) return null;
+  if (!usdt || !/^[0-9]+(?:\.[0-9]+)?$/.test(usdt)) return null;
+  return { verb, btc_sats: sats, usdt_amount: usdt };
+}
+
+function tryParseSimpleAutopostToolCall(prompt) {
+  const p = String(prompt || '').trim();
+  if (!p) return null;
+  // Avoid accidental side effects for question-like prompts.
+  if (/\?\s*$/.test(p)) return null;
+  if (!/\brepeat\b/i.test(p)) return null;
+
+  const intervalSec = parseEveryIntervalSec(p);
+  if (!intervalSec) return null;
+
+  const terms = parseSatsForUsdt(p);
+  if (!terms) return null;
+
+  const rand = randomBytes(4).toString('hex');
+  const nowMs = Date.now();
+  const ttlSec = 24 * 3600; // default 1 day if not explicitly specified
+  const channel = '0000intercomswapbtcusdt';
+
+  if (terms.verb === 'sell') {
+    // SELL sats/BTC for USDT => RFQ (BTC_LN->USDT_SOL)
+    return {
+      name: 'intercomswap_autopost_start',
+      arguments: {
+        name: `rfq_prompt_${rand}_${nowMs}`,
+        tool: 'intercomswap_rfq_post',
+        interval_sec: intervalSec,
+        ttl_sec: ttlSec,
+        args: {
+          channel,
+          trade_id: `rfq-${nowMs}-${rand}`,
+          btc_sats: terms.btc_sats,
+          usdt_amount: terms.usdt_amount,
+        },
+      },
+    };
+  }
+
+  if (terms.verb === 'buy') {
+    // BUY sats/BTC for USDT => Offer (have USDT, want BTC)
+    return {
+      name: 'intercomswap_autopost_start',
+      arguments: {
+        name: `offer_prompt_${rand}_${nowMs}`,
+        tool: 'intercomswap_offer_post',
+        interval_sec: intervalSec,
+        ttl_sec: ttlSec,
+        args: {
+          channels: [channel],
+          name: 'maker:prompt',
+          rfq_channels: [channel],
+          offers: [{ btc_sats: terms.btc_sats, usdt_amount: terms.usdt_amount }],
+        },
+      },
+    };
+  }
+
+  return null;
 }
 
 function safeJsonStringify(value) {
@@ -466,6 +558,45 @@ export class PromptRouter {
         const toolStep = {
           type: 'tool',
           name,
+          arguments: repairedArgs,
+          started_at: toolStartedAt,
+          duration_ms: nowMs() - toolStartedAt,
+          result: toolResultForModel,
+        };
+        audit.write('tool_result', toolStep);
+        if (typeof emit === 'function') await emit(toolStep);
+        if (typeof emit === 'function') {
+          await emit({
+            type: 'final',
+            session_id: id,
+            content: safeJsonStringify(toolResultForModel),
+            content_json: toolResultForModel,
+            steps: 1,
+          });
+        }
+        return {
+          session_id: id,
+          content: safeJsonStringify(toolResultForModel),
+          content_json: toolResultForModel,
+          steps: [toolStep],
+        };
+      }
+    }
+
+    // Narrow natural-language shortcut for common broadcast tasks:
+    // "sell/buy <n> sats for <x> usdt. repeat every <t>" => autopost RFQ/Offer.
+    // This avoids LLM misinterpretation and reduces reliance on flaky endpoints.
+    {
+      const nlTool = tryParseSimpleAutopostToolCall(p);
+      if (nlTool && typeof nlTool.name === 'string' && allowedToolNamesAll.has(nlTool.name) && isObject(nlTool.arguments)) {
+        const repairedArgs = repairToolArguments(nlTool.name, nlTool.arguments);
+        audit.write('nl_tool_prompt', { sessionId: id, prompt: p, name: nlTool.name, arguments: repairedArgs, autoApprove, dryRun });
+        const toolStartedAt = nowMs();
+        const toolResult = await this.toolExecutor.execute(nlTool.name, repairedArgs, { autoApprove, dryRun, secrets: session.secrets });
+        const toolResultForModel = sealToolResultForModel(toolResult, session.secrets);
+        const toolStep = {
+          type: 'tool',
+          name: nlTool.name,
           arguments: repairedArgs,
           started_at: toolStartedAt,
           duration_ms: nowMs() - toolStartedAt,
