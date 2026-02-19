@@ -4,7 +4,7 @@ Mini DEX Simulator is a lightweight decentralized exchange (DEX) simulation app 
 
 This project is built for educational and experimental purposes to better understand core DeFi mechanics.
 
-🔗 Wallet 
+🔗 TRAC Wallet Address
 
 trac14zpq7g5d5uue4v778rv7hcc6mqf0vzjkknd37a57fderkzym8h5sh4adtt
 
