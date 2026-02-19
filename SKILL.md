@@ -1,103 +1,65 @@
-🧪 Mini DEX Simulator — How to Use
+Instructions for Agent
 
-This project is a local simulation of a Decentralized Exchange (DEX) using an Automated Market Maker (AMM) model based on the constant product formula:
+This project is a local Mini DEX (Decentralized Exchange) simulator built with React and Tailwind CSS. The purpose of this application is to simulate token swaps using an Automated Market Maker (AMM) model.
 
-x * y = k
+Objective
 
+The agent (user) should:
 
-It simulates token swaps between ETH and USDC without connecting to any blockchain.
+Simulate ETH → USDC swaps
 
-🚀 1. Installation
+Observe price changes after each transaction
 
-Make sure you have Node.js v18+ installed.
+Understand slippage effects
 
-Clone or navigate to the project folder:
-cd dex-ui
+Analyze how liquidity pools behave under different swap sizes
 
-Install dependencies:
-npm install
+How to Operate the Simulator
 
-▶️ 2. Run the Project
-
-Start the development server:
+Start the application locally using:
 
 npm run dev
 
 
-Open your browser and go to:
+Open the browser at:
 
 http://localhost:5173
 
 
-You should see the Mini DEX interface running locally.
+Enter an ETH amount in the input field.
 
-💱 3. How the Swap Works
+Observe the estimated USDC output calculated automatically.
 
-The simulator uses a constant product AMM formula:
+Click the Swap button to execute the simulated trade.
 
-x * y = k
+Review updated:
 
+ETH liquidity
 
-Where:
+USDC liquidity
 
-x = ETH liquidity in the pool
+Current price
 
-y = USDC liquidity in the pool
+Swap output
 
-k = constant value
+Expected Behavior
 
-Each swap:
+The system uses a constant product formula (x * y = k).
 
-Adds ETH to the pool
+A 0.3% swap fee is applied.
 
-Calculates USDC output based on AMM formula
+Larger swaps result in higher slippage.
 
-Applies a 0.3% fee
+Pool liquidity updates dynamically after each swap.
 
-Updates the pool liquidity
+Limitations
 
-The price automatically adjusts after every swap.
+This is a simulation only.
 
-🧮 4. Performing a Swap
+No blockchain interaction.
 
-Enter an amount of ETH in the input field.
+No wallet integration.
 
-The estimated USDC output will update automatically.
+No real token transfers.
 
-Click Swap.
-
-The liquidity pool updates and the new price is calculated.
-
-Try:
-
-Small swaps (0.1 ETH)
-
-Large swaps (10 ETH)
-
-You’ll notice higher slippage for larger swaps.
-
-📊 5. What This Project Demonstrates
-
-Automated Market Maker (AMM) mechanics
-
-Slippage simulation
-
-Liquidity pool dynamics
-
-Fee accumulation (0.3%)
-
-Real-time price recalculation
-
-This is similar to early AMM models used by platforms like Uniswap.
-
-⚠️ Important Notes
-
-This is a local simulation only
-
-No real blockchain interaction
-
-No wallet connection
-
-No real tokens are used
-
-It is designed for learning and UI demonstration purposes.
+The agent should use this simulator to understand AMM mechanics and DEX pricing behavior in a controlled local environment.
