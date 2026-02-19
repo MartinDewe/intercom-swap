@@ -15,12 +15,6 @@ Mini DEX Simulator allows users to:
 
 💱 Simulate token swaps
 
-💧 Add liquidity to pools
-
-📊 Observe price changes based on supply & demand
-
-🧮 Understand AMM mechanics using the constant product formula
-
 This is not a real DEX, but a simulation tool for learning and experimentation.
 
 🧠 Core Concepts
